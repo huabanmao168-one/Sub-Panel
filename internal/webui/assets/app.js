@@ -1311,8 +1311,8 @@ function renderSuspectCard(r) {
   // <5 正常(灰) / 5-9 注意(琥珀) / 10+ 高危(红)
   const ipCls = r.distinct_ips >= 10 ? 'sus-ip-hi' : (r.distinct_ips >= 5 ? 'sus-ip-mid' : 'sus-ip-lo');
   // 使用率 pill:<5% 红、<20% 黄、其余靛蓝
-  const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'red' : (usageRatio < 20 ? 'yellow' : 'tag'));
-  const usageTxt = usageRatio < 0 ? '使用率 -' : '使用率 ' + usageRatio.toFixed(1) + '%';
+  const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'danger' : (usageRatio < 20 ? 'yellow' : 'tag'));
+  const usageTxt = usageRatio < 0 ? '使用率 -' : usageRatio.toFixed(0) + '%';
 
   card.innerHTML = `
     <div class="ev-card-head sus-head">
@@ -1320,9 +1320,10 @@ function renderSuspectCard(r) {
         <span class="sus-ip-num">${r.distinct_ips}</span>
         <span class="sus-ip-lbl">独立 IP</span>
       </span>
-      <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
-      <span class="ev-spacer"></span>
+      <span class="pill tag"><strong>${r.pull_count}</strong> 拉取</span>
       <span class="pill ${usageCls}">${usageTxt}</span>
+      <span class="ev-spacer"></span>
+      <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
     </div>
     <div class="ev-row-full">
       <span class="ev-label">订阅</span>
@@ -1333,15 +1334,11 @@ function renderSuspectCard(r) {
     <div class="ev-row-full">
       <span class="ev-label">邮箱</span>
       ${r.email ? `<span class="mono">${escapeHTML(r.email)}</span>` : '<span class="muted">(无)</span>'}
-    </div>
-    <div class="ev-meta">
-      <span class="ev-meta-item"><span class="ev-label">拉取</span><span class="mono"><strong>${r.pull_count}</strong></span></span>
-      <span class="ev-meta-item"><span class="ev-label">独立UA</span><span class="mono">${r.distinct_uas}</span></span>
-      <span class="ev-meta-item"><span class="ev-label">已用</span><span class="mono">${fmtBytes(r.traffic_used)}</span></span>
-      <span class="ev-meta-item"><span class="ev-label">总量</span><span class="mono">${fmtBytes(r.traffic_total)}</span></span>
+      <span class="ev-spacer"></span>
+      <span class="muted" style="font-size:11px">${r.distinct_uas} UA · ${fmtBytes(r.traffic_used)} / ${fmtBytes(r.traffic_total)}</span>
     </div>
     <div class="sus-actions">
-      ${tokenFull ? `<button class="sus-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">已处理</button>` : ''}
+      ${tokenFull ? `<button class="sus-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">标记已处理</button>` : ''}
     </div>
     <div class="suspect-detail" style="display:none"></div>
   `;
@@ -1360,14 +1357,19 @@ async function toggleSuspectDetail(card, r) {
   // 已展开 → 收起
   if (box.style.display !== 'none' && box.dataset.loaded) {
     box.style.display = 'none';
+    card.title = '点击展开详情';
     return;
   }
   // 收起其他已展开的
   document.querySelectorAll('#suspectsList .suspect-detail').forEach(el => {
     if (el !== box) { el.style.display = 'none'; }
   });
+  document.querySelectorAll('#suspectsList .ev-card').forEach(c => {
+    if (c !== card) c.title = '点击展开详情';
+  });
 
   box.style.display = 'block';
+  card.title = '点击收起详情';
   if (box.dataset.loaded) return; // 已加载过,直接显示
 
   box.innerHTML = '<div style="padding:8px 0;color:#6b7280;font-size:12px">加载中...</div>';
@@ -1380,40 +1382,77 @@ async function toggleSuspectDetail(card, r) {
   const detail = await api('/api/suspect-detail?' + q);
   if (!detail) { box.innerHTML = '<div style="padding:8px 0;color:#ef4444">加载失败</div>'; return; }
 
-  let html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">';
+  // 筛选栏 + 表格容器
+  const filterId = 'filter_' + Math.random().toString(36).slice(2, 9);
+  let html = `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">`;
+  html += `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">`;
+  html += `<input id="${filterId}_isp" placeholder="筛选 ISP" style="width:140px;font-size:12px;padding:4px 8px">`;
+  html += `<input id="${filterId}_country" placeholder="筛选国家" style="width:100px;font-size:12px;padding:4px 8px">`;
+  html += `<select id="${filterId}_usage" style="width:110px;font-size:12px;padding:4px 8px"><option value="">所有类型</option><option value="IDC">IDC</option><option value="CDN">CDN</option><option value="DYN">家庭</option><option value="MOB">移动</option><option value="COM">商业</option></select>`;
+  html += `<span class="muted" style="font-size:11px;margin-left:auto;align-self:center" id="${filterId}_count"></span>`;
+  html += `</div>`;
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">`;
 
   // IP 列表
-  html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表 (' + (detail.ips||[]).length + ')</div>';
-  if (detail.ips && detail.ips.length) {
-    html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
-    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">ASN</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
-    for (const ip of detail.ips) {
-      const loc = ip.country || '-';
-      const isp = ip.isp || '-';
-      const asn = ip.asn || '-';
-      const usage = ip.usage_type ? usageLabel(ip.usage_type) : '-';
-      const last = new Date(ip.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
-    }
-    html += '</table>';
-  } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
-  html += '</div>';
+  html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表</div>`;
+  html += `<div id="${filterId}_ips"></div></div>`;
 
   // UA 列表
-  html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">UA 列表 (' + (detail.uas||[]).length + ')</div>';
+  html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">UA 列表 (${(detail.uas||[]).length})</div>`;
   if (detail.uas && detail.uas.length) {
     html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
-    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
+    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th></tr>';
     for (const ua of detail.uas) {
-      const last = new Date(ua.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
+      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td></tr>`;
     }
     html += '</table>';
   } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
-  html += '</div></div>';
+  html += '</div></div></div>';
 
   box.innerHTML = html;
   box.dataset.loaded = '1';
+
+  // 挂载筛选逻辑
+  const ipsContainer = box.querySelector('#' + filterId + '_ips');
+  const countLabel = box.querySelector('#' + filterId + '_count');
+  const ispInput = box.querySelector('#' + filterId + '_isp');
+  const countryInput = box.querySelector('#' + filterId + '_country');
+  const usageSelect = box.querySelector('#' + filterId + '_usage');
+
+  function renderIPs(ips) {
+    if (!ips || !ips.length) {
+      ipsContainer.innerHTML = '<div style="color:#9ca3af;font-size:11px">无匹配 IP</div>';
+      countLabel.textContent = '';
+      return;
+    }
+    countLabel.textContent = `共 ${ips.length} 个`;
+    let t = '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
+    t += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th></tr>';
+    for (const ip of ips) {
+      const loc = ip.country || '-';
+      const isp = ip.isp || '-';
+      const usage = ip.usage_type ? usageLabel(ip.usage_type) : '-';
+      t += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td></tr>`;
+    }
+    t += '</table>';
+    ipsContainer.innerHTML = t;
+  }
+
+  function filterIPs() {
+    const ispVal = (ispInput.value || '').trim().toLowerCase();
+    const countryVal = (countryInput.value || '').trim().toLowerCase();
+    const usageVal = usageSelect.value;
+    let filtered = detail.ips || [];
+    if (ispVal) filtered = filtered.filter(ip => (ip.isp || '').toLowerCase().includes(ispVal));
+    if (countryVal) filtered = filtered.filter(ip => (ip.country || '').toLowerCase().includes(countryVal));
+    if (usageVal) filtered = filtered.filter(ip => ip.usage_type === usageVal);
+    renderIPs(filtered);
+  }
+
+  ispInput.addEventListener('input', filterIPs);
+  countryInput.addEventListener('input', filterIPs);
+  usageSelect.addEventListener('change', filterIPs);
+  renderIPs(detail.ips);
 }
 
 $('#suspectWindow').addEventListener('change', () => loadSuspects());
