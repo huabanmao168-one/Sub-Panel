@@ -1345,7 +1345,10 @@ function renderSuspectCard(r) {
   card.style.cursor = 'pointer';
   card.title = '点击展开详情';
   card.addEventListener('click', (e) => {
-    if (e.target.closest('.copyable') || e.target.closest('.sus-resolve')) return;
+    // 排除复制、按钮、筛选框的点击
+    if (e.target.closest('.copyable') || 
+        e.target.closest('.sus-resolve') || 
+        e.target.closest('.suspect-detail')) return;
     toggleSuspectDetail(card, r);
   });
   return card;
