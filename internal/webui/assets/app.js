@@ -1451,7 +1451,8 @@ async function toggleSuspectDetail(card, r) {
 
     // 点击 IP 行 → 筛选 UA
     ipsContainer.querySelectorAll('.sus-ip-row').forEach(row => {
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (e) => {
+        e.stopPropagation(); // 阻止冒泡到卡片
         const ip = row.dataset.ip;
         if (selectedIP === ip) {
           selectedIP = null;
@@ -1486,7 +1487,8 @@ async function toggleSuspectDetail(card, r) {
 
     // 点击 UA 行 → 筛选 IP
     uasContainer.querySelectorAll('.sus-ua-row').forEach(row => {
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (e) => {
+        e.stopPropagation(); // 阻止冒泡到卡片
         const ua = row.dataset.ua;
         if (selectedUA === ua) {
           selectedUA = null;
