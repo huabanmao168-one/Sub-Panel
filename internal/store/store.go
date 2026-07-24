@@ -457,6 +457,7 @@ type EventFilter struct {
 	TokenHash string
 	Action    string
 	Usage     string // usage_type 精确匹配(IDC/CDN/DYN/MOB/...)
+	UA        string // User-Agent 模糊匹配(LIKE)
 	Since     time.Time
 	Until     time.Time
 	Limit     int
@@ -490,6 +491,10 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	if f.Usage != "" {
 		q += " AND usage_type=?"
 		args = append(args, f.Usage)
+	}
+	if f.UA != "" {
+		q += " AND ua LIKE ?"
+		args = append(args, "%"+f.UA+"%")
 	}
 	if !f.Since.IsZero() {
 		q += " AND ts>=?"
@@ -931,8 +936,8 @@ func (s *Store) PurgeEvents(ctx context.Context, tenant string) (int64, int64, e
 	evN, _ := evRes.RowsAffected()
 	inN, _ := inRes.RowsAffected()
 
-	// 强制 WAL 合并回主库,再释放磁盘空间
-	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	// 强制 WAL 合并回主库 + 释放磁盘空间
+	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)")
 	_, _ = s.db.ExecContext(ctx, "VACUUM")
 
 	return evN, inN, nil

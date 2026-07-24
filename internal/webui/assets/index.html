@@ -39,6 +39,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
       IP 白名单
     </a>
+    <a class="navlink" data-tab="ua-blacklist">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      UA 黑名单
+    </a>
 
     <div class="sidebar-section">检测</div>
     <a class="navlink" data-tab="suspects">
@@ -139,6 +143,7 @@
           <div class="filter-bar">
             <input id="evIP" placeholder="按 IP 过滤">
             <input id="evToken" placeholder="按 Token 过滤">
+            <input id="evUA" placeholder="按 UA 过滤">
             <select id="evAction">
               <option value="">所有动作</option>
               <option value="pass">放行</option>
@@ -247,6 +252,25 @@
           <table>
             <thead><tr><th>IP / CIDR</th><th>备注</th><th>创建</th><th></th></tr></thead>
             <tbody id="ipWLTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- UA 黑名单 -->
+      <section id="tab-ua-blacklist" class="tab">
+        <div class="card">
+          <h3>新增 UA 黑名单</h3>
+          <div class="filter-bar">
+            <input id="uaBlPattern" placeholder="UA 关键词,如 curl">
+            <input id="uaBlNote" placeholder="备注">
+            <button class="primary" id="uaBlAddBtn">添加</button>
+          </div>
+          <p class="muted">命中黑名单的 UA 直接投毒,不进触发规则。子串匹配(忽略大小写)。</p>
+        </div>
+        <div class="datatable">
+          <table>
+            <thead><tr><th>UA 关键词</th><th>备注</th><th>创建</th><th></th></tr></thead>
+            <tbody id="uaBlTbody"></tbody>
           </table>
         </div>
       </section>

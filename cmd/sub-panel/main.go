@@ -220,6 +220,8 @@ func main() {
 	gw.SetBlacklist(bl)
 	// IP 白名单优先级最高,在网关入口短路放行
 	gw.SetIPWhitelist(rulesMgr.IPWhitelisted)
+	// UA 黑名单优先级次于 IP 白名单,高于全局黑名单
+	gw.SetUABlacklist(rulesMgr.IsUABlacklisted)
 
 	// 启动时恢复「一键透传」开关(store.meta 持久化)
 	if v, _ := st.GetMeta("passthrough_all"); v == "true" {

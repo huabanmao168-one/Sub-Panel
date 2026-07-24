@@ -55,6 +55,9 @@ type Gateway struct {
 	// 可选:IP 白名单查询(优先级最高,命中直接放行,跳过黑名单/触发规则)
 	ipWhitelisted func(ip string) bool
 
+	// 可选:UA 黑名单查询(优先级次于 IP 白名单,高于全局黑名单)
+	uaBlacklisted func(ua string) bool
+
 	// tenants 快照:读多写少,Reload 时原子替换整个 snap 指针,
 	// 读路径只取一次指针,避免遍历期间被改。
 	snap atomic.Pointer[tenantSnap]
@@ -81,6 +84,11 @@ func (g *Gateway) SetPassthroughAll(b bool) { g.passthroughAll.Store(b) }
 // SetIPWhitelist 注入 IP 白名单查询(优先级最高,命中直接放行)。
 func (g *Gateway) SetIPWhitelist(fn func(ip string) bool) {
 	g.ipWhitelisted = fn
+}
+
+// SetUABlacklist 注入 UA 黑名单查询(优先级次于 IP 白名单,高于全局黑名单)。
+func (g *Gateway) SetUABlacklist(fn func(ua string) bool) {
+	g.uaBlacklisted = fn
 }
 
 // geoFor 包装 geoLookup,nil-safe。
@@ -245,6 +253,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 也不进 detector.Observe(避免影响频率统计)。
 	if g.ipWhitelisted != nil && g.ipWhitelisted(pr.ClientIP) {
 		g.transparentProxyWithLog(w, r, pr, tokenHash, []string{"ip_whitelist"}, "pass", start)
+		return
+	}
+
+	// 2.6) UA 黑名单:命中即投毒,不进 detector.Observe(不污染频率窗口)。
+	if g.uaBlacklisted != nil && g.uaBlacklisted(pr.UA) {
+		g.respondFake(w, r, pr, tokenHash, []string{"ua_blacklist"}, start)
 		return
 	}
 

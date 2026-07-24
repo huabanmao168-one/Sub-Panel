@@ -126,13 +126,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/auth/change_password", s.auth(http.HandlerFunc(s.apiChangePassword)))
 	mux.Handle("/api/settings/passthrough", s.auth(http.HandlerFunc(s.apiPassthrough)))
 
-	// UA 规则已删除,改纯 IP 判断
-
 	// IP 白名单
 	mux.Handle("/api/ip-whitelist", s.auth(http.HandlerFunc(s.apiIPWhitelistList)))
 	mux.Handle("/api/ip-whitelist/add", s.auth(http.HandlerFunc(s.apiIPWhitelistAdd)))
 	mux.Handle("/api/ip-whitelist/update", s.auth(http.HandlerFunc(s.apiIPWhitelistUpdate)))
 	mux.Handle("/api/ip-whitelist/remove", s.auth(http.HandlerFunc(s.apiIPWhitelistRemove)))
+
+	// UA 黑名单
+	mux.Handle("/api/ua-blacklist", s.auth(http.HandlerFunc(s.apiUABlacklistList)))
+	mux.Handle("/api/ua-blacklist/add", s.auth(http.HandlerFunc(s.apiUABlacklistAdd)))
+	mux.Handle("/api/ua-blacklist/remove", s.auth(http.HandlerFunc(s.apiUABlacklistRemove)))
 
 	// 触发规则运维:清掉某 token 在滑窗里的累计,把误判 token "拉出来"。
 	// 下次再触发规则,继续按正常路径投毒(不是免疫,是 reset)。
@@ -303,6 +306,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		TokenHash: q.Get("token"),
 		Action:    q.Get("action"),
 		Usage:     strings.ToUpper(strings.TrimSpace(q.Get("usage"))),
+		UA:        q.Get("ua"),
 		Since:     time.Now().Add(-dur),
 		Limit:     limit,
 		Offset:    offset,
@@ -854,6 +858,51 @@ func (s *Server) apiIPWhitelistUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.rules.UpdateIPWhitelist(body.ID, body.Target, body.Note); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// -------- UA 黑名单 --------
+
+func (s *Server) apiUABlacklistList(w http.ResponseWriter, r *http.Request) {
+	rs, err := s.rules.ListUABlacklist()
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, rs)
+}
+
+func (s *Server) apiUABlacklistAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct{ Pattern, Note string }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.rules.AddUABlacklist(body.Pattern, body.Note); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiUABlacklistRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct{ ID int64 }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.rules.DeleteUABlacklist(body.ID); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}

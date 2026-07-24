@@ -148,6 +148,7 @@ const TAB_LOADERS = {
   'resolved': () => loadResolved(),
   'ip-bans': () => loadBans(),
   'ip-whitelist': () => loadIPWhitelist(),
+  'ua-blacklist': () => loadUABlacklist(),
   'cloud-ip': () => loadGeoIPInfo(),
   'detect-rules': () => loadRulesTable(),
   'suspects': () => loadSuspects(),
@@ -362,7 +363,7 @@ async function loadEvents(append = false) {
     tenant: state.tenant, window: state.window,
     limit: String(EV_PAGE_SIZE), offset: String(evOffset),
     ip: $('#evIP').value, token: $('#evToken').value, action: $('#evAction').value,
-    usage: $('#evUsage').value,
+    usage: $('#evUsage').value, ua: $('#evUA').value,
     show_whitelist: $('#evShowWL').checked ? '1' : '0',
   });
   const evs = await api('/api/events?' + q);
@@ -677,6 +678,45 @@ $('#ipWLAddBtn').addEventListener('click', async () => {
   if (r && r.ok) {
     $('#ipWLTarget').value = ''; $('#ipWLNote').value = '';
     toast('已添加', 'success'); loadIPWhitelist();
+  } else toast((r && r.error) || '失败', 'error');
+});
+
+// ---- UA 黑名单 ----
+async function loadUABlacklist() {
+  const list = await api('/api/ua-blacklist') || [];
+  const tbody = $('#uaBlTbody'); tbody.innerHTML = '';
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">还没有 UA 黑名单</td></tr>';
+    return;
+  }
+  for (const e of list) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono">${escapeHTML(e.Pattern)}</td>
+      <td>${escapeHTML(e.Note || '')}</td>
+      <td class="mono">${escapeHTML(fmtTime(e.CreatedTS))}</td>
+      <td><button class="danger uabl-del" data-id="${e.ID}">删除</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+$('#uaBlTbody').addEventListener('click', async (ev) => {
+  if (!ev.target.matches('.uabl-del')) return;
+  if (!confirm('删除该 UA 黑名单?')) return;
+  const id = parseInt(ev.target.dataset.id, 10);
+  const r = await apiPost('/api/ua-blacklist/remove', { id });
+  if (r && r.ok) { toast('已删除', 'success'); loadUABlacklist(); }
+  else toast((r && r.error) || '失败', 'error');
+});
+
+$('#uaBlAddBtn').addEventListener('click', async () => {
+  const pattern = $('#uaBlPattern').value.trim();
+  if (!pattern) return toast('请输入 UA 关键词', 'error');
+  const r = await apiPost('/api/ua-blacklist/add', { pattern, note: $('#uaBlNote').value.trim() });
+  if (r && r.ok) {
+    $('#uaBlPattern').value = ''; $('#uaBlNote').value = '';
+    toast('已添加', 'success'); loadUABlacklist();
   } else toast((r && r.error) || '失败', 'error');
 });
 
