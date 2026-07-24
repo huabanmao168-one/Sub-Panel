@@ -1392,56 +1392,119 @@ async function toggleSuspectDetail(card, r) {
   html += `<input id="${filterId}_isp" placeholder="筛选 ISP" style="width:140px;font-size:12px;padding:4px 8px">`;
   html += `<input id="${filterId}_country" placeholder="筛选国家" style="width:100px;font-size:12px;padding:4px 8px">`;
   html += `<select id="${filterId}_usage" style="width:110px;font-size:12px;padding:4px 8px"><option value="">所有类型</option><option value="IDC">IDC</option><option value="CDN">CDN</option><option value="DYN">家庭</option><option value="MOB">移动</option><option value="COM">商业</option></select>`;
+  html += `<button id="${filterId}_clear" style="font-size:12px;padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#f9fafb;color:#6b7280;cursor:pointer">清除筛选</button>`;
   html += `<span class="muted" style="font-size:11px;margin-left:auto;align-self:center" id="${filterId}_count"></span>`;
   html += `</div>`;
   html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">`;
 
-  // IP 列表
+  // IP 列表容器
   html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表</div>`;
   html += `<div id="${filterId}_ips"></div></div>`;
 
-  // UA 列表
-  html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">UA 列表 (${(detail.uas||[]).length})</div>`;
-  if (detail.uas && detail.uas.length) {
-    html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
-    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th></tr>';
-    for (const ua of detail.uas) {
-      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td></tr>`;
-    }
-    html += '</table>';
-  } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
-  html += '</div></div></div>';
+  // UA 列表容器
+  html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">UA 列表</div>`;
+  html += `<div id="${filterId}_uas"></div></div></div></div>`;
 
   box.innerHTML = html;
   box.dataset.loaded = '1';
 
   // 挂载筛选逻辑
   const ipsContainer = box.querySelector('#' + filterId + '_ips');
+  const uasContainer = box.querySelector('#' + filterId + '_uas');
   const countLabel = box.querySelector('#' + filterId + '_count');
   const ispInput = box.querySelector('#' + filterId + '_isp');
   const countryInput = box.querySelector('#' + filterId + '_country');
   const usageSelect = box.querySelector('#' + filterId + '_usage');
+  const clearBtn = box.querySelector('#' + filterId + '_clear');
 
-  function renderIPs(ips) {
+  // 构建绑定关系索引
+  const bindings = detail.bindings || [];
+  const ipToUAs = {}; // {ip: [{ua, count}]}
+  const uaToIPs = {}; // {ua: [{ip, count}]}
+  for (const b of bindings) {
+    if (!ipToUAs[b.ip]) ipToUAs[b.ip] = [];
+    ipToUAs[b.ip].push({ua: b.ua, count: b.count});
+    if (!uaToIPs[b.ua]) uaToIPs[b.ua] = [];
+    uaToIPs[b.ua].push({ip: b.ip, count: b.count});
+  }
+
+  let selectedIP = null;
+  let selectedUA = null;
+
+  function renderIPs(ips, highlightIP) {
     if (!ips || !ips.length) {
       ipsContainer.innerHTML = '<div style="color:#9ca3af;font-size:11px">无匹配 IP</div>';
-      countLabel.textContent = '';
       return;
     }
-    countLabel.textContent = `共 ${ips.length} 个`;
-    let t = '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
-    t += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th></tr>';
+    let t = '<table style="width:100%;font-size:11.5px;border-collapse:collapse;cursor:pointer">';
+    t += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">UA数</th></tr>';
     for (const ip of ips) {
       const loc = ip.country || '-';
       const isp = ip.isp || '-';
       const usage = ip.usage_type ? usageLabel(ip.usage_type) : '-';
-      t += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td></tr>`;
+      const uaCount = (ipToUAs[ip.ip] || []).length;
+      const bg = highlightIP === ip.ip ? 'background:rgba(99,102,241,0.12)' : '';
+      t += `<tr data-ip="${escapeHTML(ip.ip)}" style="border-bottom:1px solid #f3f4f6;${bg}" class="sus-ip-row"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px;color:#6366f1">${uaCount}</td></tr>`;
     }
     t += '</table>';
     ipsContainer.innerHTML = t;
+
+    // 点击 IP 行 → 筛选 UA
+    ipsContainer.querySelectorAll('.sus-ip-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const ip = row.dataset.ip;
+        if (selectedIP === ip) {
+          selectedIP = null;
+          renderUAs(detail.uas, null);
+          renderIPs(getFilteredIPs(), null);
+        } else {
+          selectedIP = ip;
+          selectedUA = null;
+          const relatedUAs = (ipToUAs[ip] || []).map(x => x.ua);
+          const filteredUAs = (detail.uas || []).filter(u => relatedUAs.includes(u.ua));
+          renderUAs(filteredUAs, null);
+          renderIPs(getFilteredIPs(), ip);
+        }
+      });
+    });
   }
 
-  function filterIPs() {
+  function renderUAs(uas, highlightUA) {
+    if (!uas || !uas.length) {
+      uasContainer.innerHTML = '<div style="color:#9ca3af;font-size:11px">无匹配 UA</div>';
+      return;
+    }
+    let t = '<table style="width:100%;font-size:11.5px;border-collapse:collapse;cursor:pointer">';
+    t += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">IP数</th></tr>';
+    for (const ua of uas) {
+      const ipCount = (uaToIPs[ua.ua] || []).length;
+      const bg = highlightUA === ua.ua ? 'background:rgba(99,102,241,0.12)' : '';
+      t += `<tr data-ua="${escapeHTML(ua.ua)}" style="border-bottom:1px solid #f3f4f6;${bg}" class="sus-ua-row"><td class="mono" style="padding:3px 6px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px;color:#6366f1">${ipCount}</td></tr>`;
+    }
+    t += '</table>';
+    uasContainer.innerHTML = t;
+
+    // 点击 UA 行 → 筛选 IP
+    uasContainer.querySelectorAll('.sus-ua-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const ua = row.dataset.ua;
+        if (selectedUA === ua) {
+          selectedUA = null;
+          renderIPs(getFilteredIPs(), null);
+          renderUAs(detail.uas, null);
+        } else {
+          selectedUA = ua;
+          selectedIP = null;
+          const relatedIPs = (uaToIPs[ua] || []).map(x => x.ip);
+          const filteredIPs = (detail.ips || []).filter(i => relatedIPs.includes(i.ip));
+          renderIPs(filteredIPs, null);
+          renderUAs(detail.uas, ua);
+        }
+      });
+    });
+  }
+
+  function getFilteredIPs() {
     const ispVal = (ispInput.value || '').trim().toLowerCase();
     const countryVal = (countryInput.value || '').trim().toLowerCase();
     const usageVal = usageSelect.value;
@@ -1449,13 +1512,28 @@ async function toggleSuspectDetail(card, r) {
     if (ispVal) filtered = filtered.filter(ip => (ip.isp || '').toLowerCase().includes(ispVal));
     if (countryVal) filtered = filtered.filter(ip => (ip.country || '').toLowerCase().includes(countryVal));
     if (usageVal) filtered = filtered.filter(ip => ip.usage_type === usageVal);
-    renderIPs(filtered);
+    countLabel.textContent = filtered.length !== detail.ips.length ? `筛选后 ${filtered.length} 个 IP` : '';
+    return filtered;
   }
 
-  ispInput.addEventListener('input', filterIPs);
-  countryInput.addEventListener('input', filterIPs);
-  usageSelect.addEventListener('change', filterIPs);
-  renderIPs(detail.ips);
+  function resetFilters() {
+    selectedIP = null;
+    selectedUA = null;
+    ispInput.value = '';
+    countryInput.value = '';
+    usageSelect.value = '';
+    countLabel.textContent = '';
+    renderIPs(detail.ips, null);
+    renderUAs(detail.uas, null);
+  }
+
+  ispInput.addEventListener('input', () => renderIPs(getFilteredIPs(), selectedIP));
+  countryInput.addEventListener('input', () => renderIPs(getFilteredIPs(), selectedIP));
+  usageSelect.addEventListener('change', () => renderIPs(getFilteredIPs(), selectedIP));
+  clearBtn.addEventListener('click', resetFilters);
+
+  renderIPs(detail.ips, null);
+  renderUAs(detail.uas, null);
 }
 
 $('#suspectWindow').addEventListener('change', () => loadSuspects());

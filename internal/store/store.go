@@ -1484,8 +1484,9 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 
 // SuspectDetail 单用户的 IP 列表和 UA 列表
 type SuspectDetail struct {
-	IPs []IPDetail `json:"ips"`
-	UAs []UADetail `json:"uas"`
+	IPs      []IPDetail      `json:"ips"`
+	UAs      []UADetail      `json:"uas"`
+	Bindings []BindingDetail `json:"bindings"`
 }
 
 type IPDetail struct {
@@ -1502,6 +1503,12 @@ type UADetail struct {
 	UA       string `json:"ua"`
 	HitCount int    `json:"hit_count"`
 	LastSeen int64  `json:"last_seen"`
+}
+
+type BindingDetail struct {
+	IP    string `json:"ip"`
+	UA    string `json:"ua"`
+	Count int    `json:"count"`
 }
 
 func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*SuspectDetail, error) {
@@ -1552,6 +1559,29 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 			continue
 		}
 		detail.UAs = append(detail.UAs, d)
+	}
+
+	// IP-UA 绑定关系
+	args3 := []any{token, sinceMs}
+	tenantCond3 := ""
+	if tenant != "" {
+		tenantCond3 = " AND tenant=?"
+		args3 = append(args3, tenant)
+	}
+	bindRows, err := s.db.Query(`
+		SELECT client_ip, COALESCE(ua,''), COUNT(*)
+		FROM events WHERE token_hash=? AND ts>=?`+tenantCond3+`
+		GROUP BY client_ip, ua ORDER BY COUNT(*) DESC`, args3...)
+	if err != nil {
+		return nil, err
+	}
+	defer bindRows.Close()
+	for bindRows.Next() {
+		var b BindingDetail
+		if err := bindRows.Scan(&b.IP, &b.UA, &b.Count); err != nil {
+			continue
+		}
+		detail.Bindings = append(detail.Bindings, b)
 	}
 
 	return detail, nil
