@@ -1389,9 +1389,6 @@ async function toggleSuspectDetail(card, r) {
   const filterId = 'filter_' + Math.random().toString(36).slice(2, 9);
   let html = `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">`;
   html += `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">`;
-  html += `<input id="${filterId}_isp" placeholder="筛选 ISP" style="width:140px;font-size:12px;padding:4px 8px">`;
-  html += `<input id="${filterId}_country" placeholder="筛选国家" style="width:100px;font-size:12px;padding:4px 8px">`;
-  html += `<select id="${filterId}_usage" style="width:110px;font-size:12px;padding:4px 8px"><option value="">所有类型</option><option value="IDC">IDC</option><option value="CDN">CDN</option><option value="DYN">家庭</option><option value="MOB">移动</option><option value="COM">商业</option></select>`;
   html += `<button id="${filterId}_clear" style="font-size:12px;padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#f9fafb;color:#6b7280;cursor:pointer">清除筛选</button>`;
   html += `<span class="muted" style="font-size:11px;margin-left:auto;align-self:center" id="${filterId}_count"></span>`;
   html += `</div>`;
@@ -1412,9 +1409,6 @@ async function toggleSuspectDetail(card, r) {
   const ipsContainer = box.querySelector('#' + filterId + '_ips');
   const uasContainer = box.querySelector('#' + filterId + '_uas');
   const countLabel = box.querySelector('#' + filterId + '_count');
-  const ispInput = box.querySelector('#' + filterId + '_isp');
-  const countryInput = box.querySelector('#' + filterId + '_country');
-  const usageSelect = box.querySelector('#' + filterId + '_usage');
   const clearBtn = box.querySelector('#' + filterId + '_clear');
 
   // 构建绑定关系索引
@@ -1507,31 +1501,17 @@ async function toggleSuspectDetail(card, r) {
   }
 
   function getFilteredIPs() {
-    const ispVal = (ispInput.value || '').trim().toLowerCase();
-    const countryVal = (countryInput.value || '').trim().toLowerCase();
-    const usageVal = usageSelect.value;
-    let filtered = detail.ips || [];
-    if (ispVal) filtered = filtered.filter(ip => (ip.isp || '').toLowerCase().includes(ispVal));
-    if (countryVal) filtered = filtered.filter(ip => (ip.country || '').toLowerCase().includes(countryVal));
-    if (usageVal) filtered = filtered.filter(ip => ip.usage_type === usageVal);
-    countLabel.textContent = filtered.length !== detail.ips.length ? `筛选后 ${filtered.length} 个 IP` : '';
-    return filtered;
+    return detail.ips || [];
   }
 
   function resetFilters() {
     selectedIP = null;
     selectedUA = null;
-    ispInput.value = '';
-    countryInput.value = '';
-    usageSelect.value = '';
     countLabel.textContent = '';
     renderIPs(detail.ips, null);
     renderUAs(detail.uas, null);
   }
 
-  ispInput.addEventListener('input', () => renderIPs(getFilteredIPs(), selectedIP));
-  countryInput.addEventListener('input', () => renderIPs(getFilteredIPs(), selectedIP));
-  usageSelect.addEventListener('change', () => renderIPs(getFilteredIPs(), selectedIP));
   clearBtn.addEventListener('click', resetFilters);
 
   renderIPs(detail.ips, null);
