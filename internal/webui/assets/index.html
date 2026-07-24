@@ -180,9 +180,12 @@
         <div class="card">
           <div class="card-header">
             <h3 class="card-title">已处理 Token</h3>
-            <div class="muted" style="font-size:13px">这些 token 不再出现在请求日志列表里。可点击恢复让它重新可见。</div>
+            <div class="actions">
+              <button class="danger" id="resolvedClearAll">清空全部</button>
+            </div>
           </div>
-          <div class="datatable" style="margin-top:8px">
+          <p class="muted" style="margin:0 0 12px">这些 token 不再出现在请求日志列表里。可点击恢复让它重新可见。</p>
+          <div class="datatable">
             <table>
               <thead><tr>
                 <th>Token</th>

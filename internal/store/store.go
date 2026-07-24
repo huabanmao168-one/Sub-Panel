@@ -883,6 +883,12 @@ func (s *Store) RemoveResolvedToken(ctx context.Context, token string) error {
 	return err
 }
 
+// ClearResolvedTokens 清空全部已处理 token。
+func (s *Store) ClearResolvedTokens(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM resolved_tokens")
+	return err
+}
+
 // ListResolvedTokens 列出已处理 token。tenant 空=全部。
 func (s *Store) ListResolvedTokens(ctx context.Context, tenant string) ([]ResolvedToken, error) {
 	q := "SELECT token, COALESCE(tenant,''), COALESCE(note,''), resolved_ts FROM resolved_tokens"

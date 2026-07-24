@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/resolved", s.auth(http.HandlerFunc(s.apiResolvedList)))
 	mux.Handle("/api/resolved/add", s.auth(http.HandlerFunc(s.apiResolvedAdd)))
 	mux.Handle("/api/resolved/remove", s.auth(http.HandlerFunc(s.apiResolvedRemove)))
+	mux.Handle("/api/resolved/clear", s.auth(http.HandlerFunc(s.apiResolvedClear)))
 	mux.Handle("/api/incidents", s.auth(http.HandlerFunc(s.apiIncidents)))
 	mux.Handle("/api/incidents/agg_ip", s.auth(http.HandlerFunc(s.apiIncidentsAggIP)))
 	mux.Handle("/api/bans", s.auth(http.HandlerFunc(s.apiBans)))
@@ -449,6 +450,19 @@ func (s *Server) apiResolvedRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.RemoveResolvedToken(r.Context(), body.Token); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiResolvedClear POST /api/resolved/clear — 清空全部已处理 token
+func (s *Server) apiResolvedClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	if err := s.st.ClearResolvedTokens(r.Context()); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}

@@ -483,6 +483,13 @@ $('#resolvedTbody')?.addEventListener('click', async (e) => {
   else alert('恢复失败:' + (r && r.error ? r.error : '未知错误'));
 });
 
+$('#resolvedClearAll')?.addEventListener('click', async () => {
+  if (!confirm('确定清空全部已处理 token? 此操作不可撤销!')) return;
+  const r = await apiPost('/api/resolved/clear', {});
+  if (r && r.ok) loadResolved();
+  else alert('清空失败:' + (r && r.error ? r.error : '未知错误'));
+});
+
 // ---- 请求日志页顶部:异常 IP Top 20(复用 /api/incidents/agg_ip) ----
 async function loadEvTopIP() {
   const q = new URLSearchParams({
