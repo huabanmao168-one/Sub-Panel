@@ -20,6 +20,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
 	"github.com/huabanmao168/SubPanel/internal/faker"
+	"github.com/huabanmao168/SubPanel/internal/parser"
 	"github.com/huabanmao168/SubPanel/internal/store"
 	"github.com/huabanmao168/SubPanel/internal/token"
 )
@@ -155,6 +156,84 @@ func TestE2EUnknownTenantReturns404(t *testing.T) {
 	gw.ServeHTTP(w, r)
 	if w.Code != 404 {
 		t.Errorf("expected 404 for unknown path, got %d", w.Code)
+	}
+}
+
+func TestE2ELumiUAEncryptsSubscription(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false)
+	defer cleanup()
+
+	const tok = "user-lumi-token-12345"
+	w := httptest.NewRecorder()
+	// lumi 不要求在 UA 开头,只要任意位置包含 lumi 即触发。
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Clash/1.0 lumi android", tok, "clash", "8.8.8.8"))
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := strings.TrimSpace(w.Body.String())
+	if _, err := base64.StdEncoding.DecodeString(body); err != nil {
+		t.Fatalf("lumi response should be base64 ciphertext, err=%v body=%q", err, body)
+	}
+	if strings.Contains(body, "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("encrypted body leaked plaintext: %q", body)
+	}
+	plain, ok := decryptLumiSubscriptionForTest(&parser.Request{Token: tok}, w.Body.Bytes())
+	if !ok {
+		t.Fatal("failed to decrypt lumi response with same token")
+	}
+	if !strings.Contains(string(plain), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("decrypted body mismatch: %q", string(plain))
+	}
+	if _, ok := decryptLumiSubscriptionForTest(&parser.Request{Token: "other-token-123456"}, w.Body.Bytes()); ok {
+		t.Fatal("lumi response decrypted with wrong token; key must include token")
+	}
+}
+
+func TestLumiEncryptsExistingBase64SubscriptionAsBytes(t *testing.T) {
+	const tok = "base64-token-1234"
+	// v2board 普通订阅常见形态:响应体本身就是 base64 节点列表。
+	inner := base64.StdEncoding.EncodeToString([]byte("ss://aaaa@example.com:443#hk\n"))
+	body, ok := encryptLumiSubscription(&parser.Request{Token: tok}, []byte(inner))
+	if !ok {
+		t.Fatal("encrypt failed")
+	}
+	if strings.Contains(string(body), inner) || strings.Contains(string(body), "ss://") {
+		t.Fatalf("ciphertext leaked original subscription: %q", string(body))
+	}
+	plain, ok := decryptLumiSubscriptionForTest(&parser.Request{Token: tok}, body)
+	if !ok {
+		t.Fatal("decrypt failed")
+	}
+	if string(plain) != inner {
+		t.Fatalf("AES layer should wrap original base64 body as-is, got %q want %q", string(plain), inner)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(plain))
+	if err != nil || !strings.Contains(string(decoded), "ss://aaaa@example.com") {
+		t.Fatalf("inner base64 subscription corrupted after decrypt: decoded=%q err=%v", string(decoded), err)
+	}
+}
+
+func TestE2ELumiUsesPathTokenWhenQueryTokenMissing(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false)
+	defer cleanup()
+
+	const tok = "path-token-123456"
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "http://sub.example.com/sub/cat/"+tok+"?flag=clash", nil)
+	r.Host = "sub.example.com"
+	r.RemoteAddr = "127.0.0.1:55555"
+	r.Header.Set("User-Agent", "lumi app")
+	r.Header.Set("X-Real-IP", "8.8.8.8")
+	gw.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	plain, ok := decryptLumiSubscriptionForTest(&parser.Request{Token: tok}, w.Body.Bytes())
+	if !ok {
+		t.Fatal("failed to decrypt lumi response with token extracted from path")
+	}
+	if !strings.Contains(string(plain), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("decrypted body mismatch: %q", string(plain))
 	}
 }
 

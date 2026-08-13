@@ -29,13 +29,13 @@ import (
 )
 
 type Gateway struct {
-	cfg      *config.Config
-	hasher   *token.Hasher
-	st       *store.Store
-	bans     *banlist.List
-	det      *detector.Detector
-	faker    *faker.Renderer
-	rng      *rand.Rand
+	cfg    *config.Config
+	hasher *token.Hasher
+	st     *store.Store
+	bans   *banlist.List
+	det    *detector.Detector
+	faker  *faker.Renderer
+	rng    *rand.Rand
 	// passthroughAll 一键透传:网关入口短路直接透传,不进任何规则/黑白名单。
 	passthroughAll atomic.Bool
 	// autoBan 字段已删除:命中规则统一投毒,无自动封禁逻辑。
@@ -225,6 +225,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tenant, pathMatched := g.LookupTenant(r.URL.Path)
 	pr.Tenant = tenant
 	pr.IsSubPath = pathMatched
+	if pr.Token == "" {
+		pr.Token = tokenFromSubscribePath(pr)
+	}
 
 	// 0) 一键透传:跳过所有规则/黑白名单,只要 tenant 匹配就透传(紧急回滚用)
 	if g.passthroughAll.Load() && pr.Tenant != nil && pr.IsSubPath {
@@ -321,6 +324,11 @@ func (g *Gateway) transparentProxyWithLog(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, action string, start time.Time,
 ) {
+	if isLumiUA(pr.UA) {
+		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, append(tags, "lumi_encrypt"), action, start)
+		return
+	}
+
 	rp := g.snap.Load().proxies[pr.Tenant.Name]
 	if rp == nil {
 		http.Error(w, "无可用上游", http.StatusBadGateway)
@@ -353,6 +361,85 @@ func (g *Gateway) transparentProxyWithLog(
 		RuleTags:   tags,
 		UpstreamMS: upstreamMS,
 		RespSize:   rw.size,
+		Country:    country,
+		UsageType:  usageType,
+		ISP:        isp,
+	})
+}
+
+func (g *Gateway) transparentProxyLumiWithLog(
+	w http.ResponseWriter, r *http.Request, pr *parser.Request,
+	tokenHash string, tags []string, action string, start time.Time,
+) {
+	rp := g.snap.Load().proxies[pr.Tenant.Name]
+	if rp == nil {
+		http.Error(w, "无可用上游", http.StatusBadGateway)
+		g.logEvent(pr, tokenHash, "lumi_failed", http.StatusBadGateway, append(tags, "no_proxy"), 0, 0, start)
+		return
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		r.Header.Set("X-Forwarded-For", pr.ClientIP)
+	} else {
+		r.Header.Set("X-Forwarded-For", xff+", "+pr.ClientIP)
+	}
+	// Lumi 响应要加密明文订阅体,所以强制上游不要压缩。
+	r.Header.Del("Accept-Encoding")
+	bw := &bufferingWriter{header: http.Header{}, status: 200, body: &bytes.Buffer{}}
+	rp.ServeHTTP(bw, r)
+
+	if bw.status < 200 || bw.status >= 300 {
+		for k, vs := range bw.header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(bw.status)
+		_, _ = w.Write(bw.body.Bytes())
+		g.logEvent(pr, tokenHash, "lumi_failed", bw.status, append(tags, "upstream_bad"), time.Since(start).Milliseconds(), int64(bw.body.Len()), start)
+		return
+	}
+
+	rawBody := bw.body.Bytes()
+	enc := strings.ToLower(strings.TrimSpace(bw.header.Get("Content-Encoding")))
+	decoded, decErr := decodeBody(rawBody, enc)
+	if decErr != nil {
+		decoded = rawBody
+	}
+	encrypted, ok := encryptLumiSubscription(pr, decoded)
+	if !ok {
+		http.Error(w, "上游服务不可用", http.StatusBadGateway)
+		g.logEvent(pr, tokenHash, "lumi_failed", http.StatusBadGateway, append(tags, "encrypt_failed"), time.Since(start).Milliseconds(), 0, start)
+		return
+	}
+
+	for k, vs := range bw.header {
+		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(encrypted)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encrypted)
+
+	country, usageType, isp := g.geoFor(pr.ClientIP)
+	g.st.SubmitEvent(store.Event{
+		TS:         start,
+		Tenant:     pr.Tenant.Name,
+		ClientIP:   pr.ClientIP,
+		UA:         pr.UA,
+		TokenHash:  tokenHash,
+		Flag:       pr.Flag,
+		Path:       pr.Path,
+		Status:     200,
+		Action:     action,
+		RuleTags:   tags,
+		UpstreamMS: time.Since(start).Milliseconds(),
+		RespSize:   int64(len(encrypted)),
 		Country:    country,
 		UsageType:  usageType,
 		ISP:        isp,
@@ -455,8 +542,8 @@ type bufferingWriter struct {
 	body   *bytes.Buffer
 }
 
-func (b *bufferingWriter) Header() http.Header        { return b.header }
-func (b *bufferingWriter) WriteHeader(s int)          { b.status = s }
+func (b *bufferingWriter) Header() http.Header         { return b.header }
+func (b *bufferingWriter) WriteHeader(s int)           { b.status = s }
 func (b *bufferingWriter) Write(p []byte) (int, error) { return b.body.Write(p) }
 
 // handleDeny 已删除:命中规则统一投毒,banlist 命中也走投毒。
