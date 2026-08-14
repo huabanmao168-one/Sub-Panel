@@ -145,6 +145,76 @@ func TestE2EPassNormalRequest(t *testing.T) {
 	}
 }
 
+func TestE2EStripsFlagBeforeProxyButKeepsEventFlag(t *testing.T) {
+	var upstreamQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "OK")
+	}))
+	defer upstream.Close()
+	upURL, _ := url.Parse(upstream.URL)
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "strip-flag.db")
+	saltPath := filepath.Join(dir, "salt")
+	cfg := &config.Config{
+		Listen: "127.0.0.1:0", AdminListen: "127.0.0.1:0", HMACSaltFile: saltPath,
+		Storage: config.Storage{
+			SQLitePath: dbPath, BatchFlushInterval: config.Duration(50 * time.Millisecond), BatchFlushSize: 1,
+			Retention: config.Retention{Events: config.Duration(time.Hour), Incidents: config.Duration(time.Hour)},
+		},
+		RealIP:  config.RealIP{TrustProxies: []string{"127.0.0.1"}, TrustHeaders: []string{"X-Real-IP"}},
+		Tenants: []config.Tenant{{Name: "default", Host: "sub.example.com", SubscribePath: "/sub/cat", Upstream: upURL.String()}},
+		Detector: config.DetectorCfg{ObserveOnly: true},
+		Faker:    config.FakerCfg{NodeCount: 3, BlackholeIPs: []string{"192.0.2.1"}},
+	}
+	salt, err := token.LoadOrCreateSalt(saltPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dbPath, 50*time.Millisecond, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	bans := banlist.New(st)
+	det, err := detector.New(&cfg.Detector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := NewGateway(cfg, token.NewHasher(salt), st, bans, det, faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount), AutoBanCfg{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://sub.example.com/sub/cat?token=user1&flag=general&foo=bar", nil)
+	req.Host = "sub.example.com"
+	req.RemoteAddr = "127.0.0.1:55555"
+	req.Header.Set("User-Agent", "ClashforWindows/0.20")
+	req.Header.Set("X-Real-IP", "8.8.8.8")
+	gw.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(upstreamQuery, "flag=") || !strings.Contains(upstreamQuery, "token=user1") || !strings.Contains(upstreamQuery, "foo=bar") {
+		t.Fatalf("upstream query mismatch: %q", upstreamQuery)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	evs, err := st.QueryEvents(context.Background(), store.EventFilter{Tenant: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) == 0 {
+		t.Fatal("event not persisted")
+	}
+	if evs[0].Flag != "general" {
+		t.Fatalf("panel event should keep original flag, got %q", evs[0].Flag)
+	}
+}
+
 func TestE2EUnknownTenantReturns404(t *testing.T) {
 	gw, _, _, _, cleanup := newE2E(t, false)
 	defer cleanup()
