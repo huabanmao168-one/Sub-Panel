@@ -143,7 +143,6 @@ func buildProxy(t config.Tenant, logger *slog.Logger) (*httputil.ReverseProxy, e
 		if rewritePath && strings.HasPrefix(req.URL.Path, fromPath) {
 			req.URL.Path = toPath + strings.TrimPrefix(req.URL.Path, fromPath)
 		}
-		stripClientFlagForUpstream(req)
 		baseDir(req)
 		req.Host = host
 	}
@@ -152,19 +151,6 @@ func buildProxy(t config.Tenant, logger *slog.Logger) (*httputil.ReverseProxy, e
 		http.Error(w, "上游服务不可用", http.StatusBadGateway)
 	}
 	return rp, nil
-}
-
-func stripClientFlagForUpstream(req *http.Request) {
-	if req == nil || req.URL == nil || req.URL.RawQuery == "" {
-		return
-	}
-	q := req.URL.Query()
-	if _, ok := q["flag"]; !ok {
-		return
-	}
-	q.Del("flag")
-	req.URL.RawQuery = q.Encode()
-	req.RequestURI = ""
 }
 
 // Reload 用新的 tenants 列表原子重建反代 map,并同步回 g.cfg.Tenants。

@@ -145,7 +145,7 @@ func TestE2EPassNormalRequest(t *testing.T) {
 	}
 }
 
-func TestE2EStripsFlagBeforeProxyButKeepsEventFlag(t *testing.T) {
+func TestE2EForwardsFlagToUpstreamAndKeepsEventFlag(t *testing.T) {
 	var upstreamQuery string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamQuery = r.URL.RawQuery
@@ -156,7 +156,7 @@ func TestE2EStripsFlagBeforeProxyButKeepsEventFlag(t *testing.T) {
 	upURL, _ := url.Parse(upstream.URL)
 
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "strip-flag.db")
+	dbPath := filepath.Join(dir, "forward-flag.db")
 	saltPath := filepath.Join(dir, "salt")
 	cfg := &config.Config{
 		Listen: "127.0.0.1:0", AdminListen: "127.0.0.1:0", HMACSaltFile: saltPath,
@@ -198,7 +198,7 @@ func TestE2EStripsFlagBeforeProxyButKeepsEventFlag(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if strings.Contains(upstreamQuery, "flag=") || !strings.Contains(upstreamQuery, "token=user1") || !strings.Contains(upstreamQuery, "foo=bar") {
+	if !strings.Contains(upstreamQuery, "flag=general") || !strings.Contains(upstreamQuery, "token=user1") || !strings.Contains(upstreamQuery, "foo=bar") {
 		t.Fatalf("upstream query mismatch: %q", upstreamQuery)
 	}
 
