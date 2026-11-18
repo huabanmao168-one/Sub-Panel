@@ -229,6 +229,13 @@ func main() {
 		logger.Warn("一键透传已开启 — 所有规则/黑白名单短路")
 	}
 
+	// startup: 把库里的展示定制规则推进网关(热生效前的初始加载)
+	if rules, err := st.ListDisplayRules(); err == nil {
+		gw.SetDisplayRules(rules)
+	} else {
+		logger.Warn("加载订阅展示规则失败", "err", err)
+	}
+
 	// admin server (先创建 ui,subMux 也要用它的 ReportHandler)
 	ui := webui.NewServer(cfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
 

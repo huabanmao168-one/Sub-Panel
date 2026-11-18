@@ -160,6 +160,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/report-info", s.auth(http.HandlerFunc(s.apiReportInfo)))
 	mux.Handle("/api/report-info/save", s.auth(http.HandlerFunc(s.apiReportInfoSave)))
 
+	// 订阅展示定制
+	mux.Handle("/api/display-rules", s.auth(http.HandlerFunc(s.apiDisplayRules)))
+	mux.Handle("/api/display-rules/save", s.auth(http.HandlerFunc(s.apiDisplayRuleSave)))
+	mux.Handle("/api/display-rules/remove", s.auth(http.HandlerFunc(s.apiDisplayRuleRemove)))
+	mux.Handle("/api/display-rules/preview", s.auth(http.HandlerFunc(s.apiDisplayPreview)))
+
 	return mux
 }
 

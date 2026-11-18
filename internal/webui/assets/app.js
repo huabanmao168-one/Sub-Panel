@@ -139,6 +139,7 @@ const TAB_TITLES = {
   'cloud-ip': 'GeoIP 库',
   'suspects': '嫌疑用户',
   'tenants': '机场管理',
+  'display-rules': '订阅展示',
   'settings': '设置',
 };
 
@@ -149,6 +150,7 @@ const TAB_LOADERS = {
   'ip-bans': () => loadBans(),
   'ip-whitelist': () => loadIPWhitelist(),
   'ua-blacklist': () => loadUABlacklist(),
+  'display-rules': () => loadDisplayRules(),
   'cloud-ip': () => loadGeoIPInfo(),
   'detect-rules': () => loadRulesTable(),
   'suspects': () => loadSuspects(),
@@ -1708,3 +1710,200 @@ window.withLoading = withLoading;
     withLoading(this, () => loadEvents(false));
   }, true);
 })();
+
+// ---- 订阅展示规则 ----
+const DR_MATCH_CN = {
+  email_suffix: '邮箱后缀',
+  email_exact: '邮箱完全相同',
+  email_keyword: '邮箱包含',
+  all: '全部用户',
+};
+
+let drEditingId = 0;
+let drRules = [];
+
+async function loadDisplayRules() {
+  drRules = await api('/api/display-rules') || [];
+  const tbody = $('#drTbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!drRules.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">还没有展示规则</td></tr>';
+    return;
+  }
+  for (const r of drRules) {
+    let repCount = 0;
+    try { repCount = (JSON.parse(r.replacements || '[]') || []).length; } catch (e) { repCount = 0; }
+    const cond = r.match_type === 'all'
+      ? '全部用户'
+      : (DR_MATCH_CN[r.match_type] || r.match_type) + '：' + (r.match_value || '');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono">${r.sort_order}</td>
+      <td>${escapeHTML(r.name)}</td>
+      <td>${escapeHTML(r.tenant || '全部')}</td>
+      <td>${escapeHTML(cond)}</td>
+      <td>${escapeHTML(r.airport_to || '不改')}</td>
+      <td class="mono">${repCount}</td>
+      <td>${r.enabled ? '启用' : '禁用'}</td>
+      <td>
+        <button class="dr-edit" data-id="${r.id}">编辑</button>
+        <button class="danger dr-del" data-id="${r.id}">删除</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function drRepRow(from = '', to = '', regex = false) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input class="dr-rep-from" value="${escapeHTML(from)}" placeholder="原词"></td>
+    <td><input class="dr-rep-to" value="${escapeHTML(to)}" placeholder="新词"></td>
+    <td><input type="checkbox" class="dr-rep-regex" ${regex ? 'checked' : ''}></td>
+    <td><button class="danger dr-rep-del">删除</button></td>
+  `;
+  return tr;
+}
+
+function drCollectRow(tr) {
+  const from = tr.querySelector('.dr-rep-from').value.trim();
+  const to = tr.querySelector('.dr-rep-to').value;
+  const regex = tr.querySelector('.dr-rep-regex').checked;
+  return { from, to, regex };
+}
+
+function drResetForm(r) {
+  drEditingId = r ? r.id : 0;
+  $('#drModalTitle').textContent = r ? '编辑规则' : '新增规则';
+  $('#drName').value = r ? (r.name || '') : '';
+  $('#drTenant').value = r ? (r.tenant || '') : (state.tenant || '');
+  $('#drSort').value = r ? r.sort_order : (drRules.length * 10);
+  $('#drMatchType').value = r ? (r.match_type || 'email_suffix') : 'email_suffix';
+  $('#drMatchValue').value = r ? (r.match_value || '') : '';
+  $('#drAirportFrom').value = r ? (r.airport_from || '') : '';
+  $('#drAirportTo').value = r ? (r.airport_to || '') : '';
+  $('#drScopeNode').checked = r ? !!r.scope_node : true;
+  $('#drScopeGroup').checked = r ? !!r.scope_group : true;
+  $('#drScopeHeader').checked = r ? !!r.scope_header : true;
+  $('#drEnabled').checked = r ? !!r.enabled : true;
+  $('#drTitle').value = '';
+  $('#drFilename').value = '';
+  $('#drSample').value = '';
+  $('#drPreviewInfo').textContent = '';
+  $('#drBefore').textContent = '';
+  $('#drAfter').textContent = '';
+
+  const tbody = $('#drRepTbody');
+  tbody.innerHTML = '';
+  let reps = [];
+  if (r && r.replacements) {
+    try { reps = JSON.parse(r.replacements) || []; } catch (e) { reps = []; }
+  }
+  for (const p of reps) tbody.appendChild(drRepRow(p.from || '', p.to || '', !!p.regex));
+  if (!reps.length) tbody.appendChild(drRepRow());
+}
+
+function drOpenModal(r) {
+  drResetForm(r);
+  $('#drModal').style.display = 'flex';
+}
+
+function drCloseModal() {
+  $('#drModal').style.display = 'none';
+}
+
+function drPayload() {
+  const reps = [];
+  for (const tr of $$('#drRepTbody tr')) {
+    const row = drCollectRow(tr);
+    if (!row.from) continue;
+    reps.push(row);
+  }
+  return {
+    id: drEditingId,
+    name: $('#drName').value.trim(),
+    tenant: $('#drTenant').value.trim(),
+    match_type: $('#drMatchType').value,
+    match_value: $('#drMatchValue').value.trim(),
+    airport_from: $('#drAirportFrom').value.trim(),
+    airport_to: $('#drAirportTo').value.trim(),
+    replacements: JSON.stringify(reps),
+    scope_node: $('#drScopeNode').checked,
+    scope_group: $('#drScopeGroup').checked,
+    scope_header: $('#drScopeHeader').checked,
+    enabled: $('#drEnabled').checked,
+    sort_order: parseInt($('#drSort').value || '0', 10) || 0,
+  };
+}
+
+$('#drAddBtn').addEventListener('click', () => drOpenModal(null));
+$('#drClose').addEventListener('click', drCloseModal);
+$('#drCancel').addEventListener('click', drCloseModal);
+$('#drRepAdd').addEventListener('click', () => $('#drRepTbody').appendChild(drRepRow()));
+
+$('#drTbody').addEventListener('click', async (ev) => {
+  const editBtn = ev.target.closest('.dr-edit');
+  const delBtn = ev.target.closest('.dr-del');
+  if (editBtn) {
+    const id = parseInt(editBtn.dataset.id, 10);
+    const r = drRules.find(x => x.id === id);
+    if (r) drOpenModal(r);
+    return;
+  }
+  if (delBtn) {
+    if (!confirm('删除该展示规则?')) return;
+    const id = parseInt(delBtn.dataset.id, 10);
+    const res = await apiPost('/api/display-rules/remove', { id });
+    if (res && res.ok) { toast('已删除', 'success'); loadDisplayRules(); }
+    else toast((res && res.error) || '删除失败', 'error');
+  }
+});
+
+$('#drRepTbody').addEventListener('click', (ev) => {
+  if (!ev.target.matches('.dr-rep-del')) return;
+  ev.target.closest('tr').remove();
+});
+
+$('#drSave').addEventListener('click', async () => {
+  const body = drPayload();
+  if (!body.name) return toast('请填规则名', 'error');
+  const res = await apiPost('/api/display-rules/save', body);
+  if (res && res.ok) {
+    toast('已保存', 'success');
+    drCloseModal();
+    loadDisplayRules();
+  } else {
+    toast((res && res.error) || '保存失败', 'error');
+  }
+});
+
+$('#drPreviewBtn').addEventListener('click', async () => {
+  const body = drPayload();
+  const res = await apiPost('/api/display-rules/preview', {
+    title: $('#drTitle').value.trim(),
+    filename: $('#drFilename').value.trim(),
+    sample: $('#drSample').value,
+    airport_from: body.airport_from,
+    airport_to: body.airport_to,
+    replacements: body.replacements,
+    scope_node: body.scope_node,
+    scope_group: body.scope_group,
+    scope_header: body.scope_header,
+  });
+  if (!res || !res.ok) {
+    toast((res && res.error) || '预览失败', 'error');
+    return;
+  }
+  const FMT_CN = { clash: 'Clash', uri: '链接列表', singbox: 'sing-box', text: '全文替换', none: '未改动' };
+  let info = '识别格式：' + (FMT_CN[res.format] || res.format);
+  if (res.title_after !== undefined) {
+    info += '；标题：' + (res.title_before || '(空)') + ' → ' + (res.title_after || '(空)');
+  }
+  if (res.filename_after !== undefined) {
+    info += '；文件名：' + (res.filename_before || '(空)') + ' → ' + (res.filename_after || '(空)');
+  }
+  $('#drPreviewInfo').textContent = info;
+  $('#drBefore').textContent = res.before || '';
+  $('#drAfter').textContent = res.after || '';
+});
