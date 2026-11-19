@@ -2,14 +2,14 @@
 # Sub-Panel 一键安装 / 升级脚本
 #
 # 用法:
-#   curl -fsSL https://raw.githubusercontent.com/huabanmao168/SubPanel/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/huabanmao168-one/Sub-Panel/main/install.sh | bash
 #   或:wget -qO- ... | bash
 #   升级:再跑一次同样命令,会保留 /opt/Sub-Panel/{config.yml,data/}
 #
 # 卸载:/opt/Sub-Panel/uninstall.sh
 set -euo pipefail
 
-REPO="huabanmao168/SubPanel"
+REPO="huabanmao168-one/Sub-Panel"
 INSTALL_DIR="/opt/Sub-Panel"
 TMPFS_DIR="/tmp/sub-panel"
 SERVICE_NAME="sub-panel"

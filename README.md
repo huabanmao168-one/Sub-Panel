@@ -15,7 +15,7 @@ V2Board 订阅前置反代清洗网关 —— 黑名单 / 风控规则 / GeoIP /
 ## 一键安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huabanmao168/SubPanel/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/huabanmao168-one/Sub-Panel/main/install.sh | bash
 ```
 
 支持 Linux amd64 / arm64。
@@ -84,7 +84,7 @@ bash /opt/Sub-Panel/uninstall.sh --purge   # 完全卸载
 ## 本地构建
 
 ```bash
-git clone https://github.com/huabanmao168/SubPanel.git
+git clone https://github.com/huabanmao168-one/Sub-Panel.git
 cd SubPanel
 go build -o sub-panel ./cmd/sub-panel
 ```

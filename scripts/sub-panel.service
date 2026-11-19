@@ -1,6 +1,6 @@
 [Unit]
 Description=Sub-Panel - V2Board 订阅前置网关
-Documentation=https://github.com/huabanmao168/SubPanel
+Documentation=https://github.com/huabanmao168-one/Sub-Panel
 After=network-online.target
 Wants=network-online.target
 
