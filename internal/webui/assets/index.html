@@ -289,11 +289,11 @@
             <h3>订阅展示规则</h3>
             <div class="actions"><button class="primary" id="drAddBtn">新增规则</button></div>
           </div>
-          <p class="muted">按用户邮箱匹配,命中后改写下发订阅里的机场名和节点名关键词。多条规则按排序取第一条命中,不叠加。查不到邮箱的用户不会命中。</p>
+          <p class="muted">按用户邮箱后缀匹配,命中后改写下发订阅里的机场名和节点名关键词。只对已添加规则的机场生效,查不到邮箱的用户不会命中。</p>
         </div>
         <div class="datatable">
           <table>
-            <thead><tr><th>排序</th><th>规则名</th><th>机场</th><th>匹配条件</th><th>新机场名</th><th>替换词数</th><th>状态</th><th></th></tr></thead>
+            <thead><tr><th>规则名</th><th>机场</th><th>邮箱后缀</th><th>新机场名</th><th>状态</th><th></th></tr></thead>
             <tbody id="drTbody"></tbody>
           </table>
         </div>
@@ -303,45 +303,19 @@
             <div class="modal-body">
               <div class="filter-bar">
                 <input id="drName" placeholder="规则名">
-                <input id="drTenant" placeholder="机场名,留空=全部机场">
-                <input id="drSort" type="number" placeholder="排序,越小越优先" style="min-width:120px">
+                <select id="drTenant"></select>
               </div>
               <div class="filter-bar">
-                <select id="drMatchType">
-                  <option value="email_suffix">邮箱后缀</option>
-                  <option value="email_exact">邮箱完全相同</option>
-                  <option value="email_keyword">邮箱包含</option>
-                  <option value="all">该机场全部用户</option>
-                </select>
-                <input id="drMatchValue" placeholder="如 auto.com">
+                <input id="drMatchValue" placeholder="邮箱后缀,如 auto.com">
               </div>
               <div class="filter-bar">
-                <input id="drAirportFrom" placeholder="原机场名(可空)">
-                <input id="drAirportTo" placeholder="新机场名(空=不改)">
+                <input id="drAirportFrom" placeholder="原机场名">
+                <input id="drAirportTo" placeholder="新机场名">
               </div>
               <h3 style="margin:10px 0 6px">节点名关键词替换</h3>
-              <div class="datatable"><table>
-                <thead><tr><th>原词</th><th>新词</th><th>正则</th><th></th></tr></thead>
-                <tbody id="drRepTbody"></tbody>
-              </table></div>
-              <button id="drRepAdd" style="margin:6px 0">添加一行</button>
+              <textarea id="drReps" rows="6" style="width:100%" placeholder="每行一条,格式:旧词=新词"></textarea>
               <div class="filter-bar">
-                <label><input type="checkbox" id="drScopeNode" checked> 节点名</label>
-                <label><input type="checkbox" id="drScopeGroup" checked> 分组名与引用</label>
-                <label><input type="checkbox" id="drScopeHeader" checked> 文件名与标题</label>
                 <label><input type="checkbox" id="drEnabled" checked> 启用</label>
-              </div>
-              <h3 style="margin:10px 0 6px">预览</h3>
-              <div class="filter-bar">
-                <input id="drTitle" placeholder="样例标题(profile-title)">
-                <input id="drFilename" placeholder="样例文件名,如 花瓣.yaml">
-              </div>
-              <textarea id="drSample" rows="6" style="width:100%" placeholder="粘贴一段样例订阅(Clash / 链接列表 / sing-box)"></textarea>
-              <button id="drPreviewBtn" style="margin:6px 0">预览改写</button>
-              <div class="muted" id="drPreviewInfo"></div>
-              <div style="display:flex;gap:8px">
-                <pre id="drBefore" style="flex:1;overflow:auto;max-height:200px"></pre>
-                <pre id="drAfter" style="flex:1;overflow:auto;max-height:200px"></pre>
               </div>
             </div>
             <div class="modal-footer"><button id="drCancel">取消</button><button class="primary" id="drSave">保存</button></div>

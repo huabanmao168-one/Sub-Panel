@@ -1712,39 +1712,29 @@ window.withLoading = withLoading;
 })();
 
 // ---- 订阅展示规则 ----
-const DR_MATCH_CN = {
-  email_suffix: '邮箱后缀',
-  email_exact: '邮箱完全相同',
-  email_keyword: '邮箱包含',
-  all: '全部用户',
-};
-
 let drEditingId = 0;
+let drEditingSort = 0;
 let drRules = [];
+let drTenants = [];
 
 async function loadDisplayRules() {
-  drRules = await api('/api/display-rules') || [];
+  const res = await Promise.all([api('/api/display-rules'), api('/api/tenants')]);
+  drRules = res[0] || [];
+  drTenants = res[1] || [];
   const tbody = $('#drTbody');
   if (!tbody) return;
   tbody.innerHTML = '';
   if (!drRules.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">还没有展示规则</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">还没有展示规则</td></tr>';
     return;
   }
   for (const r of drRules) {
-    let repCount = 0;
-    try { repCount = (JSON.parse(r.replacements || '[]') || []).length; } catch (e) { repCount = 0; }
-    const cond = r.match_type === 'all'
-      ? '全部用户'
-      : (DR_MATCH_CN[r.match_type] || r.match_type) + '：' + (r.match_value || '');
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${r.sort_order}</td>
       <td>${escapeHTML(r.name)}</td>
-      <td>${escapeHTML(r.tenant || '全部')}</td>
-      <td>${escapeHTML(cond)}</td>
+      <td>${escapeHTML(r.tenant || '')}</td>
+      <td>${escapeHTML('@' + (r.match_value || ''))}</td>
       <td>${escapeHTML(r.airport_to || '不改')}</td>
-      <td class="mono">${repCount}</td>
       <td>${r.enabled ? '启用' : '禁用'}</td>
       <td>
         <button class="dr-edit" data-id="${r.id}">编辑</button>
@@ -1755,56 +1745,59 @@ async function loadDisplayRules() {
   }
 }
 
-function drRepRow(from = '', to = '', regex = false) {
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td><input class="dr-rep-from" value="${escapeHTML(from)}" placeholder="原词"></td>
-    <td><input class="dr-rep-to" value="${escapeHTML(to)}" placeholder="新词"></td>
-    <td><input type="checkbox" class="dr-rep-regex" ${regex ? 'checked' : ''}></td>
-    <td><button class="danger dr-rep-del">删除</button></td>
-  `;
-  return tr;
+function drFillTenantSelect(current) {
+  const sel = $('#drTenant');
+  sel.innerHTML = '';
+  const names = drTenants.map(t => t.name);
+  if (current && !names.includes(current)) {
+    const o = document.createElement('option');
+    o.value = current;
+    o.textContent = current + '(已删除)';
+    sel.appendChild(o);
+  }
+  for (const t of drTenants) {
+    const o = document.createElement('option');
+    o.value = t.name;
+    o.textContent = t.name;
+    sel.appendChild(o);
+  }
+  if (current) sel.value = current;
+  else if (state.tenant && names.includes(state.tenant)) sel.value = state.tenant;
 }
 
-function drCollectRow(tr) {
-  const from = tr.querySelector('.dr-rep-from').value.trim();
-  const to = tr.querySelector('.dr-rep-to').value;
-  const regex = tr.querySelector('.dr-rep-regex').checked;
-  return { from, to, regex };
+function drRepsToText(json) {
+  let reps = [];
+  try { reps = JSON.parse(json || '[]') || []; } catch (e) { reps = []; }
+  return reps.map(p => (p.from || '') + '=' + (p.to || '')).join('\n');
+}
+
+function drTextToReps(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const i = line.indexOf('=');
+    if (i <= 0) continue;
+    const from = line.slice(0, i).trim();
+    if (!from) continue;
+    out.push({ from, to: line.slice(i + 1), regex: false });
+  }
+  return out;
 }
 
 function drResetForm(r) {
   drEditingId = r ? r.id : 0;
+  drEditingSort = r ? r.sort_order : drRules.length * 10;
   $('#drModalTitle').textContent = r ? '编辑规则' : '新增规则';
   $('#drName').value = r ? (r.name || '') : '';
-  $('#drTenant').value = r ? (r.tenant || '') : (state.tenant || '');
-  $('#drSort').value = r ? r.sort_order : (drRules.length * 10);
-  $('#drMatchType').value = r ? (r.match_type || 'email_suffix') : 'email_suffix';
+  drFillTenantSelect(r ? r.tenant : '');
   $('#drMatchValue').value = r ? (r.match_value || '') : '';
   $('#drAirportFrom').value = r ? (r.airport_from || '') : '';
   $('#drAirportTo').value = r ? (r.airport_to || '') : '';
-  $('#drScopeNode').checked = r ? !!r.scope_node : true;
-  $('#drScopeGroup').checked = r ? !!r.scope_group : true;
-  $('#drScopeHeader').checked = r ? !!r.scope_header : true;
+  $('#drReps').value = r ? drRepsToText(r.replacements) : '';
   $('#drEnabled').checked = r ? !!r.enabled : true;
-  $('#drTitle').value = '';
-  $('#drFilename').value = '';
-  $('#drSample').value = '';
-  $('#drPreviewInfo').textContent = '';
-  $('#drBefore').textContent = '';
-  $('#drAfter').textContent = '';
-
-  const tbody = $('#drRepTbody');
-  tbody.innerHTML = '';
-  let reps = [];
-  if (r && r.replacements) {
-    try { reps = JSON.parse(r.replacements) || []; } catch (e) { reps = []; }
-  }
-  for (const p of reps) tbody.appendChild(drRepRow(p.from || '', p.to || '', !!p.regex));
-  if (!reps.length) tbody.appendChild(drRepRow());
 }
 
 function drOpenModal(r) {
+  if (!drTenants.length) return toast('请先在机场管理里添加机场', 'error');
   drResetForm(r);
   $('#drModal').style.display = 'flex';
 }
@@ -1814,33 +1807,26 @@ function drCloseModal() {
 }
 
 function drPayload() {
-  const reps = [];
-  for (const tr of $$('#drRepTbody tr')) {
-    const row = drCollectRow(tr);
-    if (!row.from) continue;
-    reps.push(row);
-  }
   return {
     id: drEditingId,
     name: $('#drName').value.trim(),
-    tenant: $('#drTenant').value.trim(),
-    match_type: $('#drMatchType').value,
-    match_value: $('#drMatchValue').value.trim(),
+    tenant: $('#drTenant').value,
+    match_type: 'email_suffix',
+    match_value: $('#drMatchValue').value.trim().replace(/^@/, ''),
     airport_from: $('#drAirportFrom').value.trim(),
     airport_to: $('#drAirportTo').value.trim(),
-    replacements: JSON.stringify(reps),
-    scope_node: $('#drScopeNode').checked,
-    scope_group: $('#drScopeGroup').checked,
-    scope_header: $('#drScopeHeader').checked,
+    replacements: JSON.stringify(drTextToReps($('#drReps').value)),
+    scope_node: true,
+    scope_group: true,
+    scope_header: true,
     enabled: $('#drEnabled').checked,
-    sort_order: parseInt($('#drSort').value || '0', 10) || 0,
+    sort_order: drEditingSort,
   };
 }
 
 $('#drAddBtn').addEventListener('click', () => drOpenModal(null));
 $('#drClose').addEventListener('click', drCloseModal);
 $('#drCancel').addEventListener('click', drCloseModal);
-$('#drRepAdd').addEventListener('click', () => $('#drRepTbody').appendChild(drRepRow()));
 
 $('#drTbody').addEventListener('click', async (ev) => {
   const editBtn = ev.target.closest('.dr-edit');
@@ -1860,14 +1846,11 @@ $('#drTbody').addEventListener('click', async (ev) => {
   }
 });
 
-$('#drRepTbody').addEventListener('click', (ev) => {
-  if (!ev.target.matches('.dr-rep-del')) return;
-  ev.target.closest('tr').remove();
-});
-
 $('#drSave').addEventListener('click', async () => {
   const body = drPayload();
   if (!body.name) return toast('请填规则名', 'error');
+  if (!body.tenant) return toast('请选择机场', 'error');
+  if (!body.match_value) return toast('请填邮箱后缀', 'error');
   const res = await apiPost('/api/display-rules/save', body);
   if (res && res.ok) {
     toast('已保存', 'success');
@@ -1876,34 +1859,4 @@ $('#drSave').addEventListener('click', async () => {
   } else {
     toast((res && res.error) || '保存失败', 'error');
   }
-});
-
-$('#drPreviewBtn').addEventListener('click', async () => {
-  const body = drPayload();
-  const res = await apiPost('/api/display-rules/preview', {
-    title: $('#drTitle').value.trim(),
-    filename: $('#drFilename').value.trim(),
-    sample: $('#drSample').value,
-    airport_from: body.airport_from,
-    airport_to: body.airport_to,
-    replacements: body.replacements,
-    scope_node: body.scope_node,
-    scope_group: body.scope_group,
-    scope_header: body.scope_header,
-  });
-  if (!res || !res.ok) {
-    toast((res && res.error) || '预览失败', 'error');
-    return;
-  }
-  const FMT_CN = { clash: 'Clash', uri: '链接列表', singbox: 'sing-box', text: '全文替换', none: '未改动' };
-  let info = '识别格式：' + (FMT_CN[res.format] || res.format);
-  if (res.title_after !== undefined) {
-    info += '；标题：' + (res.title_before || '(空)') + ' → ' + (res.title_after || '(空)');
-  }
-  if (res.filename_after !== undefined) {
-    info += '；文件名：' + (res.filename_before || '(空)') + ' → ' + (res.filename_after || '(空)');
-  }
-  $('#drPreviewInfo').textContent = info;
-  $('#drBefore').textContent = res.before || '';
-  $('#drAfter').textContent = res.after || '';
 });

@@ -34,6 +34,20 @@ func (g *Gateway) DisplayRuleCount() int {
 	return len(s.rules)
 }
 
+// hasDisplayRule 该机场是否有启用的规则;没有就完全走原有直通路径,不缓冲、不查库。
+func (g *Gateway) hasDisplayRule(tenant string) bool {
+	s := g.displayRules.Load()
+	if s == nil {
+		return false
+	}
+	for i := range s.rules {
+		if s.rules[i].Enabled && s.rules[i].Tenant == tenant {
+			return true
+		}
+	}
+	return false
+}
+
 // matchDisplayRule 按 token 找邮箱,再按排序取第一条命中的启用规则。
 // 未命中、查不到邮箱、规则为空都返回 nil。
 func (g *Gateway) matchDisplayRule(tenant, token string) *rewrite.Options {
@@ -41,18 +55,11 @@ func (g *Gateway) matchDisplayRule(tenant, token string) *rewrite.Options {
 	if s == nil || len(s.rules) == 0 || token == "" {
 		return nil
 	}
-	hasAll := false
-	for _, r := range s.rules {
-		if r.Enabled && r.MatchType == "all" {
-			hasAll = true
-			break
-		}
-	}
 	var email string
 	if rep, err := g.st.GetUserReportByToken(token, tenant); err == nil && rep != nil {
 		email = rep.Email
 	}
-	if email == "" && !hasAll {
+	if email == "" {
 		return nil
 	}
 	for i := range s.rules {
@@ -92,7 +99,7 @@ func optionsOf(r *store.DisplayRule) *rewrite.Options {
 // 任何一步失败都原样返回上游内容,并追加 display_failed 标签,不影响下发。
 func (g *Gateway) transparentProxyDisplay(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
-	tokenHash string, tags []string, start time.Time, opts *rewrite.Options,
+	tokenHash string, tags []string, start time.Time,
 ) {
 	rp := g.snap.Load().proxies[pr.Tenant.Name]
 	if rp == nil {
@@ -125,6 +132,22 @@ func (g *Gateway) transparentProxyDisplay(
 			time.Since(start).Milliseconds(), int64(bw.body.Len()), start)
 		return
 	}
+
+	// 先转发后查邮箱:上游处理订阅时已同步上报,此时邮箱通常已落库,首次拉取也能命中。
+	opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token)
+	if opts == nil {
+		for k, vs := range bw.header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(bw.status)
+		_, _ = w.Write(bw.body.Bytes())
+		g.logEvent(pr, tokenHash, "pass", bw.status, append(tags, "display_nomatch"),
+			time.Since(start).Milliseconds(), int64(bw.body.Len()), start)
+		return
+	}
+	tags = append(tags, "display_rewrite")
 
 	rawBody := bw.body.Bytes()
 	enc := strings.ToLower(strings.TrimSpace(bw.header.Get("Content-Encoding")))

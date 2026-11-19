@@ -111,6 +111,9 @@ func seedUserEmail(t *testing.T, st *store.Store, tok, email string) {
 
 func installRule(t *testing.T, gw *Gateway, st *store.Store, r store.DisplayRule) {
 	t.Helper()
+	if r.Tenant == "" {
+		r.Tenant = "default"
+	}
 	if err := r.Validate(); err != nil {
 		t.Fatalf("规则不合法: %v", err)
 	}
@@ -293,13 +296,14 @@ func TestDisplayRuleFirstMatchWins(t *testing.T) {
 		ScopeNode: true, ScopeGroup: true, ScopeHeader: true, Enabled: true, SortOrder: 0,
 	})
 	r2 := store.DisplayRule{
-		Name: "后命中", MatchType: "all", AirportFrom: "花瓣", AirportTo: "不该生效",
+		Name: "后命中", Tenant: "default", MatchType: "all", AirportFrom: "花瓣", AirportTo: "不该生效",
 		ScopeNode: true, ScopeGroup: true, ScopeHeader: true, Enabled: true, SortOrder: 10,
 	}
 	if err := r2.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	r2.ID = 0
+	r2.Tenant = "default"
 	if _, err := st.UpsertDisplayRule(r2); err != nil {
 		t.Fatal(err)
 	}

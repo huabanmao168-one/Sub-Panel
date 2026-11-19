@@ -328,19 +328,14 @@ func (g *Gateway) transparentProxyWithLog(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, action string, start time.Time,
 ) {
-	opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token)
+	// 该机场开了展示规则才缓冲改写;没开的机场完全走原有直通路径。
+	display := g.hasDisplayRule(pr.Tenant.Name)
 	if isLumiUA(pr.UA) {
-		t := append(tags, "lumi_encrypt")
-		if opts != nil {
-			t = append(t, "display_rewrite")
-		}
-		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, t, action, start, opts)
+		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, append(tags, "lumi_encrypt"), action, start, display)
 		return
 	}
-
-	// 命中展示定制规则:需要整包缓冲才能改写,走独立分支。
-	if opts != nil {
-		g.transparentProxyDisplay(w, r, pr, tokenHash, append(tags, "display_rewrite"), start, opts)
+	if display {
+		g.transparentProxyDisplay(w, r, pr, tokenHash, tags, start)
 		return
 	}
 
@@ -385,7 +380,7 @@ func (g *Gateway) transparentProxyWithLog(
 func (g *Gateway) transparentProxyLumiWithLog(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, action string, start time.Time,
-	opts *rewrite.Options,
+	display bool,
 ) {
 	rp := g.snap.Load().proxies[pr.Tenant.Name]
 	if rp == nil {
@@ -423,14 +418,16 @@ func (g *Gateway) transparentProxyLumiWithLog(
 		decoded = rawBody
 	}
 	// 展示定制:加密前改写名称字段(只动展示名,不动连接参数)
-	if opts != nil {
-		if res := rewrite.Apply(decoded, bw.header.Get("Content-Type"), opts); res.Format != "none" {
-			decoded = res.Body
-			if tags != nil {
+	if display {
+		// 先转发后查邮箱:此时上游已同步上报,邮箱通常已落库
+		if opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token); opts != nil {
+			if res := rewrite.Apply(decoded, bw.header.Get("Content-Type"), opts); res.Format != "none" {
+				decoded = res.Body
 				tags = append(tags, "fmt_"+res.Format)
 			}
+			rewrite.ApplyHeaders(bw.header, opts)
+			tags = append(tags, "display_rewrite")
 		}
-		rewrite.ApplyHeaders(bw.header, opts)
 	}
 	encrypted, ok := encryptLumiSubscription(pr, decoded)
 	if !ok {
