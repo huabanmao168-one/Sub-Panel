@@ -241,6 +241,25 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	// 新增列(兼容旧库)
 	_, _ = db.Exec(`ALTER TABLE user_reports ADD COLUMN connect_ips TEXT DEFAULT ''`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_reports_tenant ON user_reports(tenant, last_seen)`)
+	// 订阅展示定制规则(机场名替换 / 节点名关键词替换)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS display_rules (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		name         TEXT NOT NULL,
+		tenant       TEXT NOT NULL DEFAULT '',
+		match_type   TEXT NOT NULL,
+		match_value  TEXT NOT NULL DEFAULT '',
+		airport_from TEXT NOT NULL DEFAULT '',
+		airport_to   TEXT NOT NULL DEFAULT '',
+		replacements TEXT NOT NULL DEFAULT '[]',
+		scope_node   INTEGER NOT NULL DEFAULT 1,
+		scope_group  INTEGER NOT NULL DEFAULT 1,
+		scope_header INTEGER NOT NULL DEFAULT 1,
+		enabled      INTEGER NOT NULL DEFAULT 1,
+		sort_order   INTEGER NOT NULL DEFAULT 0,
+		created_ts   INTEGER NOT NULL,
+		updated_ts   INTEGER NOT NULL
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_display_rules_order ON display_rules(sort_order, id)`)
 	s := &Store{
 		db:         db,
 		eventCh:    make(chan Event, 1024),

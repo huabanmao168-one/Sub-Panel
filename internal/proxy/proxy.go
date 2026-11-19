@@ -24,6 +24,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/detector"
 	"github.com/huabanmao168/SubPanel/internal/faker"
 	"github.com/huabanmao168/SubPanel/internal/parser"
+	"github.com/huabanmao168/SubPanel/internal/rewrite"
 	"github.com/huabanmao168/SubPanel/internal/store"
 	"github.com/huabanmao168/SubPanel/internal/token"
 )
@@ -61,6 +62,9 @@ type Gateway struct {
 	// tenants 快照:读多写少,Reload 时原子替换整个 snap 指针,
 	// 读路径只取一次指针,避免遍历期间被改。
 	snap atomic.Pointer[tenantSnap]
+
+	// 订阅展示定制规则快照(保存后热生效)
+	displayRules atomic.Pointer[displayRuleSet]
 }
 
 // SetGeoLookup 注入 GeoIP 查询(给请求日志用)。
@@ -324,8 +328,19 @@ func (g *Gateway) transparentProxyWithLog(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, action string, start time.Time,
 ) {
+	opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token)
 	if isLumiUA(pr.UA) {
-		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, append(tags, "lumi_encrypt"), action, start)
+		t := append(tags, "lumi_encrypt")
+		if opts != nil {
+			t = append(t, "display_rewrite")
+		}
+		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, t, action, start, opts)
+		return
+	}
+
+	// 命中展示定制规则:需要整包缓冲才能改写,走独立分支。
+	if opts != nil {
+		g.transparentProxyDisplay(w, r, pr, tokenHash, append(tags, "display_rewrite"), start, opts)
 		return
 	}
 
@@ -370,6 +385,7 @@ func (g *Gateway) transparentProxyWithLog(
 func (g *Gateway) transparentProxyLumiWithLog(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, action string, start time.Time,
+	opts *rewrite.Options,
 ) {
 	rp := g.snap.Load().proxies[pr.Tenant.Name]
 	if rp == nil {
@@ -405,6 +421,16 @@ func (g *Gateway) transparentProxyLumiWithLog(
 	decoded, decErr := decodeBody(rawBody, enc)
 	if decErr != nil {
 		decoded = rawBody
+	}
+	// 展示定制:加密前改写名称字段(只动展示名,不动连接参数)
+	if opts != nil {
+		if res := rewrite.Apply(decoded, bw.header.Get("Content-Type"), opts); res.Format != "none" {
+			decoded = res.Body
+			if tags != nil {
+				tags = append(tags, "fmt_"+res.Format)
+			}
+		}
+		rewrite.ApplyHeaders(bw.header, opts)
 	}
 	encrypted, ok := encryptLumiSubscription(pr, decoded)
 	if !ok {
