@@ -38,6 +38,9 @@ func (r *DisplayRule) Validate() error {
 	if r.Name == "" {
 		return errors.New("规则名不能为空")
 	}
+	if r.Tenant == "" {
+		return errors.New("请选择机场")
+	}
 	switch r.MatchType {
 	case "email_suffix", "email_exact", "email_keyword":
 		if r.MatchValue == "" {
@@ -56,9 +59,8 @@ func (r *DisplayRule) Validate() error {
 			return errors.New("关键词替换格式错误")
 		}
 	}
-	if !r.ScopeNode && !r.ScopeGroup && !r.ScopeHeader {
-		return errors.New("至少勾选一个作用范围")
-	}
+	// 作用范围固定为全改(节点名、分组名与引用、文件名与标题)
+	r.ScopeNode, r.ScopeGroup, r.ScopeHeader = true, true, true
 	return nil
 }
 
