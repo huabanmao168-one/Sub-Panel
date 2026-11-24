@@ -707,110 +707,41 @@ body.has-modal { overflow: hidden; }
   color: var(--text-muted);
 }
 
-/* 触发规则弹窗:分组标题 + 条件卡片网格 + 折叠高级 */
-.section-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text);
-  margin: 18px 0 10px;
-  padding-bottom: 6px;
-  border-bottom: 2px solid #8b5cf6;
-}
-
-/* 双列网格 */
-.rule-grid { display: grid; gap: 0 14px; }
-.rule-grid-2 { grid-template-columns: 1fr 1fr; }
-@media (max-width: 640px) { .rule-grid-2 { grid-template-columns: 1fr; } }
-
-/* 启用/停用分段开关 */
-.seg-switch {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg, #f9fafb);
-  height: 32px;
-}
-.seg-switch label {
-  position: relative; display: inline-flex; align-items: center; justify-content: center;
-  padding: 0 14px; cursor: pointer; font-size: 13px; color: #6b7280;
-  user-select: none; min-width: 56px;
-}
-.seg-switch input { position: absolute; opacity: 0; pointer-events: none; }
-.seg-switch label:has(input:checked) {
-  background: #fff; color: #1f2937; font-weight: 600;
-  box-shadow: inset 0 0 0 1px #8b5cf6;
-}
-.seg-switch label + label { border-left: 1px solid var(--border); }
-
-/* 计数条件 4 行公式排版 — 左基准对齐,等宽数字 */
-.rule-cond-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 4px 0 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: rgba(99,102,241,0.025);
-}
-.cond-row-v2 {
-  display: grid;
-  grid-template-columns: minmax(76px, 1.4fr) minmax(44px, 1fr) auto minmax(44px, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-  min-height: 34px;
-}
-.cond-row-v2 .cond-name {
-  font-size: 13px;
-  color: #1f2937;
-  font-weight: 500;
-}
-.cond-row-v2 input[type="number"] {
-  min-width: 0;
-  min-height: 30px;
-  height: 30px;
-  padding: 0 8px;
-  text-align: right;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-}
-.cond-row-v2 input[type="number"]:placeholder-shown {
-  color: var(--text-dim);
-}
-.cond-row-v2 .cond-sep {
-  font-size: 12px;
-  color: var(--text-muted);
-  text-align: center;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.cond-row-v2 .cond-unit {
-  font-size: 12px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-/* Chrome/Safari 数字 spinner 占地方,藏掉 */
-.cond-row-v2 input[type="number"]::-webkit-outer-spin-button,
-.cond-row-v2 input[type="number"]::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-.cond-row-v2 input[type="number"] { appearance: textfield; }
-@media (max-width: 480px) {
-  .modal-header, .modal-body, .modal-footer { padding: 12px; }
-  .cond-row-v2 { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; gap: 5px; }
-  .cond-row-v2 .cond-name { grid-column: 1 / -1; }
-}
+/* Trigger rules: shared controls, responsive cards, and explicit state. */
+.rule-toolbar { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(225px,100%), 1fr)); gap: 10px; }
+.rule-list-status { margin: 0 0 10px; }
+.rule-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(390px,100%), 1fr)); gap: 12px; }
+.rule-card { margin: 0; display: flex; flex-direction: column; }
+.rule-card-header { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: flex-start; }
+.rule-card-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.rule-card h3 { margin: 0; overflow-wrap: anywhere; }
+.rule-card .section-copy { overflow-wrap: anywhere; }
+.rule-card .table-actions { margin-top: auto; }
+.rule-conditions { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; padding: 0; }
+.rule-conditions li { padding: 4px 8px; border-radius: 999px; background: var(--primary-soft); color: #1e40af; font-size: 12px; max-width: 100%; overflow-wrap: anywhere; }
+.rule-warning { background: #fffbeb; color: #92400e; padding: 7px 9px; border-radius: var(--radius-sm); margin-bottom: 10px; }
+.rule-editor-group { min-width: 0; margin: 16px 0 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rule-editor-group legend { padding: 0 5px; font-weight: 700; }
+.rule-editor-group .section-copy { margin: 0 0 9px; }
+.rule-condition-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px,100%), 1fr)); gap: 10px; }
+.rule-condition-card { background: var(--surface-hover); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; min-width: 0; }
+.rule-condition-card strong { display: block; margin-bottom: 6px; font-size: 13px; }
+.rule-condition-fields { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; }
+.rule-preview { margin-top: 12px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+.rule-preview .rule-warning { margin-bottom: 0; }
+.rule-preset-list { display: grid; gap: 8px; margin: 12px 0; }
+.rule-preset-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; }
+.rule-preset-option input { flex: none; width: 16px; height: 16px; margin: 2px 0 0; }
+.rule-preset-option > span { min-width: 0; overflow-wrap: anywhere; }
+.rule-preset-option small { display: block; color: var(--text-muted); margin-top: 4px; }
+.rule-preset-option:has(:checked) { background: #eff6ff; border-color: #93c5fd; }
+.rule-preset-option:has(:disabled) { background: var(--surface-hover); cursor: default; }
+@media (max-width: 480px) { .modal-header, .modal-body, .modal-footer { padding: 12px; } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 
 
-/* 保留旧 cond-row(仍可能被其他地方引用) */
-.cond-row { display: flex; align-items: center; gap: 8px; font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
-.cond-row input[type="number"] { font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
-.cond-sep { color: var(--text-muted); font-size: 13px; white-space: nowrap; }
 
 details.advanced {
   margin: 14px 0;
@@ -828,16 +759,6 @@ details.advanced > summary {
 }
 details.advanced[open] > summary {
   margin-bottom: 10px;
-}
-.rule-summary {
-  font-family: ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.rule-summary strong {
-  color: #1f2937;
-  font-weight: 600;
 }
 
 /* 请求日志加载更多按钮 */

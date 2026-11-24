@@ -94,7 +94,7 @@ type When struct {
 	FromCloudIP      bool  `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
 
 	// GeoIP 字段(需配 geoip.xdb_path 才生效)
-	// 同一字段 in 和 not_in 同时配时,not_in 优先(用于"非 CN 拒"这种反向白名单语义)
+	// 不要同时配置同一字段的 in 与 not_in。历史规则按任一命中处理。
 	CountryIn      []string `yaml:"country_in"`     // 国家命中列表(ISO2/中文名都行)
 	CountryNotIn   []string `yaml:"country_not_in"` // 国家不在列表则命中(反向白名单)
 	UsageTypeIn    []string `yaml:"usage_type_in"`  // IDC/CDN/DYN/MOB/COM 命中

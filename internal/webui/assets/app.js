@@ -1221,166 +1221,254 @@ $('#reportCodeCopyBtn').addEventListener('click', async () => {
 
 // ============ 触发规则 ============
 
-const SEV_CN = {}; // 等级已废弃,保留空对象避免外部偶发引用报错
+const RULE_COUNTERS = [
+  ['token_freq', 'Tf', '同一订阅拉取', '次'],
+  ['ip_freq', 'If', '同一 IP 拉取', '次'],
+  ['token_distinct_ips', 'Td', '同一订阅出现', '个独立 IP'],
+  ['ip_distinct_tokens', 'Id', '同一 IP 访问', '个不同订阅'],
+];
+const RULE_LIST_FIELDS = {
+  country_in: ['ruleFormCountryIn', '国家在名单内'], country_not_in: ['ruleFormCountryNotIn', '国家不在名单内'],
+  usage_type_in: ['ruleFormUsageIn', 'IP 用途在名单内'], usage_type_not_in: ['ruleFormUsageNotIn', 'IP 用途不在名单内'],
+  isp_contains: ['ruleFormISP', '运营商包含'],
+};
+let ruleView = null;
+let ruleRequest = 0;
 
-function escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-function fmtTs(unix) {
-  if (!unix) return '-';
-  const d = new Date(unix * 1000);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-// 把 API 规则压成一行人话摘要,放表格里看。
-function ruleSummary(r) {
+function readableRuleWindow(seconds) {
+  let n = Number(seconds || 0);
   const parts = [];
-  const fmt = (label, win, gte, suffix) => {
-    if (win > 0 && gte > 0) {
-      parts.push(`<strong>${label}</strong> ${win}s/${gte}${suffix}`);
-    }
-  };
-  fmt('Tok频', r.token_freq_window_sec, r.token_freq_gte, '次');
-  fmt('IP频',  r.ip_freq_window_sec, r.ip_freq_gte, '次');
-  fmt('Tok×IP', r.token_distinct_ips_window_sec, r.token_distinct_ips_gte, 'IP');
-  fmt('IP×Tok', r.ip_distinct_tokens_window_sec, r.ip_distinct_tokens_gte, 'Tok');
-  if (r.from_cloud_ip) parts.push('<strong>云IP</strong>');
-  if (r.country_in && r.country_in.length) parts.push(`<strong>国家∈</strong>${r.country_in.join(',')}`);
-  if (r.country_not_in && r.country_not_in.length) parts.push(`<strong>国家∉</strong>${r.country_not_in.join(',')}`);
-  if (r.usage_type_in && r.usage_type_in.length) parts.push(`<strong>用途∈</strong>${r.usage_type_in.map(usageLabel).join(',')}`);
-  if (r.usage_type_not_in && r.usage_type_not_in.length) parts.push(`<strong>用途∉</strong>${r.usage_type_not_in.map(usageLabel).join(',')}`);
-  if (r.isp_contains && r.isp_contains.length) parts.push(`<strong>ISP⊇</strong>${r.isp_contains.join(',')}`);
-  return parts.length ? parts.join(' · ') : '<span style="color:#dc2626">⚠ 无任何条件</span>';
+  for (const [unit, scale] of [['天', 86400], ['小时', 3600], ['分钟', 60], ['秒', 1]]) {
+    const value = Math.floor(n / scale);
+    if (value > 0) { parts.push(`${value} ${unit}`); n %= scale; }
+  }
+  return parts.join(' ') || '—';
 }
-
-async function loadRulesTable() {
-  const r = await api('/api/detect_rules');
-  const tbody = $('#rulesTbody'); tbody.innerHTML = '';
-  if (!Array.isArray(r) || !r.length) {
-    setEmptyRow(tbody, '暂无触发规则，可新增规则。');
-    return;
+function ruleConditionLabels(r) {
+  const labels = [];
+  for (const [key,, label, unit] of RULE_COUNTERS) {
+    const win = r[`${key}_window_sec`], threshold = r[`${key}_gte`];
+    if (win > 0 && threshold > 0) labels.push(`${readableRuleWindow(win)}内，${label} ≥ ${threshold} ${unit}`);
   }
-  for (const x of r) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="mono">${escapeHtml(x.name)}</td>
-      <td>${escapeHtml(x.desc || '-')}</td>
-      <td class="rule-summary">${ruleSummary(x)}</td>
-      <td>${x.enabled ? '✓' : '<span style="color:#9ca3af">×</span>'}</td>
-      <td class="mono" style="color:#6b7280">${fmtTs(x.updated_ts)}</td>
-      <td>
-        <button data-act="edit"   data-name="${escapeHtml(x.name)}">编辑</button>
-        <button data-act="toggle" data-name="${escapeHtml(x.name)}">${x.enabled ? '禁用' : '启用'}</button>
-        <button data-act="delete" data-name="${escapeHtml(x.name)}" class="danger">删除</button>
-      </td>`;
-    tbody.appendChild(tr);
+  if (r.from_cloud_ip) labels.push('命中云厂商 IP');
+  for (const [key, [, label]] of Object.entries(RULE_LIST_FIELDS)) {
+    if (r[key]?.length) labels.push(`${label}：${(key.startsWith('usage_type') ? r[key].map(usageLabel) : r[key]).join('、')}`);
   }
-  $$('#rulesTbody button').forEach(btn => {
-    btn.addEventListener('click', () => onRuleAction(btn.dataset.act, btn.dataset.name, r));
+  return labels;
+}
+function ruleHasGeo(r) { return r.from_cloud_ip || Object.keys(RULE_LIST_FIELDS).some(key => r[key]?.length); }
+function ruleIssues(r) {
+  const issues = r.issue ? [r.issue] : [];
+  if (ruleHasGeo(r) && !ruleView?.geoip_ready) issues.push('GeoIP 数据库未加载，地理、运营商或云厂商条件不会触发。');
+  const cap = ruleView?.max_window_sec;
+  if (cap && RULE_COUNTERS.some(([key]) => r[`${key}_window_sec`] > cap)) issues.push('计数窗口超过当前运行容量。');
+  return issues;
+}
+function renderRules() {
+  const list = $('#rulesList');
+  if (!ruleView) return;
+  const term = $('#ruleSearch').value.trim().toLowerCase();
+  const filter = $('#ruleStatusFilter').value;
+  const rows = ruleView.rules.filter(row => {
+    if (filter === 'enabled' && !row.enabled || filter === 'disabled' && row.enabled) return false;
+    if (filter === 'needs_attention' && !ruleIssues(row).length) return false;
+    return !term || [row.name, row.desc, ...ruleConditionLabels(row)].some(x => String(x || '').toLowerCase().includes(term));
   });
-}
-
-async function onRuleAction(act, name, list) {
-  const item = list.find(x => x.name === name);
-  if (!item) return;
-  if (act === 'edit') { openRuleModal(item); return; }
-  if (act === 'toggle') {
-    const body = { ...item, enabled: !item.enabled, original_name: item.name };
-    const r = await apiPost('/api/detect_rules/save', body);
-    if (r && r.ok) { toast(item.enabled ? '已禁用' : '已启用', 'success'); loadRulesTable(); }
-    else toast((r && r.error) || '失败', 'error');
+  $('#ruleListStatus').textContent = `显示 ${rows.length} / ${ruleView.rules.length} 条规则`;
+  list.replaceChildren();
+  if (!rows.length) {
+    list.innerHTML = `<div class="card empty-state">${ruleView.rules.length ? '没有符合筛选的规则。' : '暂无触发规则。可以导入预设，或新增自定义规则。'}</div>`;
     return;
   }
-  if (act === 'delete') {
-    if (!confirm(`确认删除规则 ${name}?(立即热生效,不可撤销)`)) return;
-    const r = await apiPost('/api/detect_rules/remove', { name });
-    if (r && r.ok) { toast('已删除', 'success'); loadRulesTable(); }
-    else toast((r && r.error) || '失败', 'error');
+  for (const x of rows) {
+    const card = document.createElement('article');
+    card.className = 'card rule-card';
+    const conditions = ruleConditionLabels(x);
+    const issues = ruleIssues(x);
+    const id = escapeHTML(x.name);
+    card.innerHTML = `<div class="rule-card-header"><div class="rule-card-title"><h3>${id}</h3>
+       <span class="pill ${x.enabled ? 'pass' : 'empty'}">${x.enabled ? '已启用' : '已停用'}</span></div>
+       <span class="section-copy">${x.updated_ts > 0 ? '更新于 ' + escapeHTML(fmtTime(x.updated_ts * 1000)) : ''}</span></div>
+      ${x.desc ? `<p class="section-copy">${escapeHTML(x.desc)}</p>` : ''}
+      <ul class="rule-conditions">${(conditions.length ? conditions : ['暂无有效条件']).map(t => `<li>${escapeHTML(t)}</li>`).join('')}</ul>
+      ${issues.length ? `<p class="section-copy rule-warning">${issues.map(escapeHTML).join(' ')}</p>` : ''}
+      <div class="table-actions"><button type="button" data-rule-action="edit" data-name="${id}">编辑</button>
+      <button type="button" data-rule-action="copy" data-name="${id}">复制为新规则</button>
+      <button type="button" data-rule-action="toggle" data-name="${id}">${x.enabled ? '停用' : '启用'}</button>
+      <button type="button" data-rule-action="delete" data-name="${id}" class="danger">删除</button></div>`;
+    list.append(card);
   }
 }
-
-function listToCSV(list) { return (list && list.length) ? list.join(', ') : ''; }
-function csvToList(s) {
-  return String(s || '').split(/[,，\s]+/).map(x => x.trim()).filter(Boolean);
+async function loadRulesTable() {
+  const request = ++ruleRequest;
+  $('#rulesList').setAttribute('aria-busy', 'true');
+  $('#ruleListStatus').textContent = '正在读取规则…';
+  const r = await api('/api/detect_rules?view=editor');
+  if (request !== ruleRequest) return;
+  $('#rulesList').setAttribute('aria-busy', 'false');
+  if (!Array.isArray(r?.rules)) {
+    $('#ruleListStatus').textContent = ruleView ? '刷新失败，正在显示上次读取的规则。' : '读取失败，请点击刷新重试。';
+    return;
+  }
+  ruleView = r;
+  const enabled = r.rules.filter(x => x.enabled).length;
+  $('#ruleEnabledCount').textContent = enabled;
+  $('#ruleDisabledCount').textContent = r.rules.length - enabled;
+  $('#ruleCapacity').textContent = readableRuleWindow(r.max_window_sec);
+  $('#ruleGeoStatus').textContent = r.geoip_ready ? '已加载' : '未加载';
+  renderRules();
 }
+$('#ruleSearch').addEventListener('input', renderRules);
+$('#ruleStatusFilter').addEventListener('change', renderRules);
+$('#rulesList').addEventListener('click', e => {
+  const btn = e.target.closest('[data-rule-action]');
+  if (!btn) return;
+  const {ruleAction: action, name} = btn.dataset;
+  const item = ruleView?.rules.find(x => x.name === name);
+  if (!item) return;
+  if (action === 'edit' || action === 'copy') { openRuleModal(item, action === 'copy'); return; }
+  if (action === 'delete' && !confirm(`删除「${name}」？删除后不能撤销。`)) return;
+  if (action === 'toggle' && !item.enabled && !confirm(`启用「${name}」？启用后，命中请求会返回 HTTP 403。`)) return;
+  withLoading(btn, async () => {
+    const r = action === 'delete' ? await apiPost('/api/detect_rules/remove', {name}) :
+      await apiPost('/api/detect_rules/state', {name, enabled: !item.enabled});
+    if (r?.ok) { toast(action === 'delete' ? '已删除' : item.enabled ? '已停用' : '已启用', 'success'); await loadRulesTable(); }
+    else if (r) toast(r.error || '规则操作失败', 'error');
+  });
+});
 
-function openRuleModal(r) {
-  const isEdit = !!r;
-  $('#ruleModalTitle').textContent = isEdit ? `编辑规则 - ${r.name}` : '新增规则';
-  const set = (id, v) => { $('#' + id).value = v == null ? '' : v; };
-  set('ruleFormName',          isEdit ? r.name : '');
-  set('ruleFormDesc',          isEdit ? r.desc : '');
-  set('ruleFormTfWin',         isEdit ? (r.token_freq_window_sec || '') : '');
-  set('ruleFormTfGte',         isEdit ? (r.token_freq_gte || '') : '');
-  set('ruleFormIfWin',         isEdit ? (r.ip_freq_window_sec || '') : '');
-  set('ruleFormIfGte',         isEdit ? (r.ip_freq_gte || '') : '');
-  set('ruleFormTdWin',         isEdit ? (r.token_distinct_ips_window_sec || '') : '');
-  set('ruleFormTdGte',         isEdit ? (r.token_distinct_ips_gte || '') : '');
-  set('ruleFormIdWin',         isEdit ? (r.ip_distinct_tokens_window_sec || '') : '');
-  set('ruleFormIdGte',         isEdit ? (r.ip_distinct_tokens_gte || '') : '');
-  set('ruleFormCountryIn',     isEdit ? listToCSV(r.country_in) : '');
-  set('ruleFormCountryNotIn',  isEdit ? listToCSV(r.country_not_in) : '');
-  set('ruleFormUsageIn',       isEdit ? listToCSV(r.usage_type_in) : '');
-  set('ruleFormUsageNotIn',    isEdit ? listToCSV(r.usage_type_not_in) : '');
-  set('ruleFormISP',           isEdit ? listToCSV(r.isp_contains) : '');
-  $('#ruleFormFromCloud').checked = isEdit ? !!r.from_cloud_ip : false;
-  const enabledOn = isEdit ? !!r.enabled : true;
-  $('#ruleFormEnabledOn').checked  = enabledOn;
-  $('#ruleFormEnabledOff').checked = !enabledOn;
-  $('#ruleModal').dataset.originalName = isEdit ? r.name : '';
-  $('#ruleModal').dataset.sortOrder = isEdit ? String(r.sort_order || 0) : '0';
+let ruleEditorRevision = 0;
+function csvToList(s) { return [...new Set(String(s || '').split(/[,，\n]+/).map(x => x.trim()).filter(Boolean))]; }
+function ruleCounterField(id, suffix) { return $(`#ruleForm${id}${suffix}`); }
+function readRuleEditor() {
+  const modal = $('#ruleModal');
+  const body = {name: $('#ruleFormName').value.trim(), desc: $('#ruleFormDesc').value.trim(),
+    enabled: $('#ruleFormEnabled').checked, sort_order: Number(modal.dataset.sortOrder || 0),
+    original_name: modal.dataset.originalName || '', from_cloud_ip: $('#ruleFormFromCloud').checked};
+  for (const [key, id] of RULE_COUNTERS) {
+    body[`${key}_window_sec`] = Number(ruleCounterField(id, 'Win').value);
+    body[`${key}_gte`] = Number(ruleCounterField(id, 'Gte').value);
+  }
+  for (const [field, [id]] of Object.entries(RULE_LIST_FIELDS)) body[field] = csvToList($('#' + id).value);
+  return body;
+}
+function ruleDraftError(r) {
+  for (const [key,, label] of RULE_COUNTERS) {
+    const a = r[`${key}_window_sec`], b = r[`${key}_gte`];
+    if ([a, b].some(x => !Number.isSafeInteger(x) || x < 0)) return `${label}：窗口和阈值必须是整数。`;
+    if ((a > 0) !== (b > 0)) return `${label}：窗口和阈值必须同时填写。`;
+    if (a > (ruleView?.max_window_sec || 86400)) return `${label}：窗口超过服务当前容量。`;
+  }
+  if (r.country_in.length && r.country_not_in.length) return '同一条规则不能同时设置两种国家匹配方式。';
+  if (r.usage_type_in.length && r.usage_type_not_in.length) return '同一条规则不能同时设置两种 IP 用途匹配方式。';
+  if (!ruleConditionLabels(r).length) return '请至少填写一项条件。';
+  if (r.enabled && ruleView && !ruleView.geoip_ready && ruleHasGeo(r) && !RULE_COUNTERS.some(([key]) => r[`${key}_window_sec`] > 0)) {
+    return 'GeoIP 未加载，纯 GeoIP 规则可以保存为停用，但还不能启用。';
+  }
+  return '';
+}
+function renderRulePreview() {
+  const r = readRuleEditor();
+  const preview = $('#rulePreview');
+  const error = ruleDraftError(r);
+  preview.classList.toggle('rule-warning', Boolean(error));
+  const conditions = ruleConditionLabels(r);
+  preview.textContent = error || (r.enabled ? '命中任一条件即拒绝：' : '当前保存为停用，启用后任一条件命中即拒绝：') + conditions.join('；') + '。';
+  if (!error && ruleView && !ruleView.geoip_ready && ruleHasGeo(r)) preview.textContent += ' GeoIP 条件在数据库加载前不会触发。';
+}
+function openRuleModal(r, copy = false) {
+  ++ruleEditorRevision;
+  const edit = Boolean(r && !copy);
+  const name = copy ? `${r.name.slice(0, 116)} 副本` : r?.name || '';
+  $('#ruleModalTitle').textContent = edit ? `编辑规则：${r.name}` : copy ? '复制为新规则' : '新增规则';
+  $('#ruleFormName').value = name;
+  $('#ruleFormDesc').value = r?.desc || '';
+  for (const [key, id] of RULE_COUNTERS) {
+    ruleCounterField(id, 'Win').value = r?.[`${key}_window_sec`] || '';
+    ruleCounterField(id, 'Gte').value = r?.[`${key}_gte`] || '';
+  }
+  for (const [field, [id]] of Object.entries(RULE_LIST_FIELDS)) $('#' + id).value = r?.[field]?.join(', ') || '';
+  $('#ruleFormFromCloud').checked = Boolean(r?.from_cloud_ip);
+  $('#ruleFormEnabled').checked = Boolean(edit && r.enabled);
+  $('#ruleAdvanced').open = Boolean(r && ruleHasGeo(r));
+  $('#ruleModal').dataset.originalName = edit ? r.name : '';
+  $('#ruleModal').dataset.sortOrder = edit ? String(r.sort_order || 0) : '0';
+  const resolution = readableRuleWindow(ruleView?.resolution_sec || 60);
+  $('#ruleWindowHelp').textContent = `同时填写窗口和阈值；两项都留空则忽略。当前按 ${resolution}时间桶近似计数，建议使用整分钟窗口。`;
+  renderRulePreview();
   showDialog('ruleModal', '#ruleFormName');
 }
-
 function closeRuleModal() { closeActiveDialog('ruleModal'); }
-
 $('#ruleAddBtn').addEventListener('click', () => openRuleModal(null));
 $('#ruleModalClose').addEventListener('click', closeRuleModal);
 $('#ruleFormCancel').addEventListener('click', closeRuleModal);
-$('#ruleModal').addEventListener('click', e => {
-  if (e.target.id === 'ruleModal') closeRuleModal();
+$('#ruleModal').addEventListener('click', e => { if (e.target.id === 'ruleModal') closeRuleModal(); });
+$('#ruleEditorForm').addEventListener('input', renderRulePreview);
+$('#ruleEditorForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const body = readRuleEditor();
+  const error = body.name ? ruleDraftError(body) : '请填写规则名。';
+  if (error) { toast(error, 'error'); return; }
+  const revision = ruleEditorRevision;
+  withLoading($('#ruleFormSave'), async () => {
+    const r = await apiPost('/api/detect_rules/save', body);
+    if (r?.ok) {
+      toast(body.enabled ? '已保存并启用' : '已保存为停用', 'success');
+      if (revision === ruleEditorRevision) closeRuleModal();
+      await loadRulesTable();
+    } else if (r) toast(r.error || '保存失败', 'error');
+  });
 });
 
-$('#ruleFormSave').addEventListener('click', async () => {
-  const num = id => {
-    const v = parseInt($('#' + id).value, 10);
-    return isNaN(v) || v < 0 ? 0 : v;
-  };
-  const name = $('#ruleFormName').value.trim();
-  if (!name) { toast('规则名必填', 'error'); return; }
-  const body = {
-    original_name:                     $('#ruleModal').dataset.originalName || '',
-    name,
-    desc:                              $('#ruleFormDesc').value.trim(),
-    enabled:                           $('#ruleFormEnabledOn').checked,
-    sort_order:                        parseInt($('#ruleModal').dataset.sortOrder || '0', 10),
-    token_freq_window_sec:             num('ruleFormTfWin'),
-    token_freq_gte:                    num('ruleFormTfGte'),
-    ip_freq_window_sec:                num('ruleFormIfWin'),
-    ip_freq_gte:                       num('ruleFormIfGte'),
-    token_distinct_ips_window_sec:     num('ruleFormTdWin'),
-    token_distinct_ips_gte:            num('ruleFormTdGte'),
-    ip_distinct_tokens_window_sec:     num('ruleFormIdWin'),
-    ip_distinct_tokens_gte:            num('ruleFormIdGte'),
-    from_cloud_ip:                     $('#ruleFormFromCloud').checked,
-    country_in:                        csvToList($('#ruleFormCountryIn').value),
-    country_not_in:                    csvToList($('#ruleFormCountryNotIn').value),
-    usage_type_in:                     csvToList($('#ruleFormUsageIn').value),
-    usage_type_not_in:                 csvToList($('#ruleFormUsageNotIn').value),
-    isp_contains:                      csvToList($('#ruleFormISP').value),
-  };
-  const r = await apiPost('/api/detect_rules/save', body);
-  if (r && r.ok) {
-    toast('已保存,热生效中', 'success');
-    closeRuleModal();
-    loadRulesTable();
-  } else {
-    toast((r && r.error) || '失败', 'error');
+let presetRequest = 0;
+let presetImporting = false;
+function selectedPresets() { return $$('#rulePresetList input:checked:not(:disabled)').map(x => x.value); }
+function updatePresetSelection() {
+  const count = selectedPresets().length;
+  $('#rulePresetImport').disabled = !count || presetImporting;
+  $('#rulePresetImport').textContent = presetImporting ? '导入中…' : count ? `导入 ${count} 条` : '导入所选';
+  $('#rulePresetStatus').textContent = count ? `已选 ${count} 条，导入后保持停用。` : '尚未选中可导入的预设。';
+}
+async function openPresetModal() {
+  const request = ++presetRequest;
+  $('#rulePresetList').replaceChildren();
+  $('#rulePresetImport').disabled = true;
+  $('#rulePresetStatus').textContent = '正在读取预设规则…';
+  showDialog('rulePresetModal', '#rulePresetClose');
+  const items = await api('/api/detect_rules/presets');
+  if (request !== presetRequest || $('#rulePresetModal').hidden) return;
+  if (!Array.isArray(items)) { $('#rulePresetStatus').textContent = '预设读取失败，关闭后可重新打开。'; return; }
+  for (const item of items) {
+    const label = document.createElement('label');
+    label.className = 'rule-preset-option';
+    label.innerHTML = `<input type="checkbox" value="${escapeHTML(item.id)}" ${item.existing ? 'disabled' : ''}>
+      <span><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.description)}</small>
+      <small>${escapeHTML(item.caution)}</small>${item.existing ? `<span class="pill empty">已存在：${escapeHTML(item.existing)}</span>` : ''}</span>`;
+    $('#rulePresetList').append(label);
   }
+  updatePresetSelection();
+}
+function closePresetModal() { closeActiveDialog('rulePresetModal'); }
+$('#rulePresetBtn').addEventListener('click', openPresetModal);
+$('#rulePresetClose').addEventListener('click', closePresetModal);
+$('#rulePresetCancel').addEventListener('click', closePresetModal);
+$('#rulePresetModal').addEventListener('click', e => { if (e.target.id === 'rulePresetModal') closePresetModal(); });
+$('#rulePresetList').addEventListener('change', updatePresetSelection);
+$('#rulePresetForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const ids = selectedPresets();
+  if (presetImporting || !ids.length) return;
+  presetImporting = true;
+  const request = presetRequest;
+  updatePresetSelection();
+  const r = await apiPost('/api/detect_rules/presets/import', {ids});
+  presetImporting = false;
+  updatePresetSelection();
+  if (r?.ok) {
+    toast(`导入 ${r.imported.length} 条（停用），跳过 ${r.skipped.length} 条。`, 'success');
+    if (request === presetRequest) closePresetModal();
+    await loadRulesTable();
+  } else if (r) toast(r.error || '导入失败', 'error');
 });
 
 // ────────────────────────────────────────────────

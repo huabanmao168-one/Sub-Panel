@@ -121,6 +121,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/api/detect_rules", s.auth(http.HandlerFunc(s.apiDetectRules)))
 	mux.Handle("/api/detect_rules/save", s.auth(http.HandlerFunc(s.apiDetectRuleSave)))
+	mux.Handle("/api/detect_rules/state", s.auth(http.HandlerFunc(s.apiDetectRuleState)))
+	mux.Handle("/api/detect_rules/presets", s.auth(http.HandlerFunc(s.apiDetectPresets)))
+	mux.Handle("/api/detect_rules/presets/import", s.auth(http.HandlerFunc(s.apiDetectPresetImport)))
 	mux.Handle("/api/detect_rules/remove", s.auth(http.HandlerFunc(s.apiDetectRuleRemove)))
 	mux.Handle("/api/settings/runtime", s.auth(http.HandlerFunc(s.apiRuntimeSettings)))
 	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

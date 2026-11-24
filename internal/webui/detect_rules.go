@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/huabanmao168/SubPanel/internal/config"
+	"github.com/huabanmao168/SubPanel/internal/detector"
+	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
 
@@ -32,7 +34,7 @@ type detectRuleAPI struct {
 	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order"`
 
-	// 计数条件:都以"窗口 + 阈值"成对出现,任一字段为 0 视为未启用该条件
+	// 计数条件：窗口与阈值都大于零才启用，两项均为零则忽略。
 	TokenFreqWindowSec        int `json:"token_freq_window_sec"`
 	TokenFreqGTE              int `json:"token_freq_gte"`
 	IPFreqWindowSec           int `json:"ip_freq_window_sec"`
@@ -50,7 +52,8 @@ type detectRuleAPI struct {
 	UsageTypeNotIn []string `json:"usage_type_not_in"`
 	ISPContains    []string `json:"isp_contains"`
 
-	UpdatedTS int64 `json:"updated_ts"`
+	UpdatedTS int64  `json:"updated_ts"`
+	Issue     string `json:"issue,omitempty"`
 }
 
 // rowToAPI 把 DB 行转成 API 对外格式。
@@ -100,6 +103,12 @@ func apiToWhen(a *detectRuleAPI) (config.When, error) {
 		UsageTypeIn:    trimList(a.UsageTypeIn),
 		UsageTypeNotIn: trimList(a.UsageTypeNotIn),
 		ISPContains:    trimList(a.ISPContains),
+	}
+	if len(w.CountryIn) > 0 && len(w.CountryNotIn) > 0 {
+		return w, fmt.Errorf("国家条件只能选择「在名单内」或「不在名单内」，不能同时配置")
+	}
+	if len(w.UsageTypeIn) > 0 && len(w.UsageTypeNotIn) > 0 {
+		return w, fmt.Errorf("IP 用途条件只能选择「在名单内」或「不在名单内」，不能同时配置")
 	}
 	// 计数条件:窗口和阈值必须同时给,否则视为关闭该条件
 	mkCond := func(winSec, gte int, name string) (*config.Cond, error) {
@@ -153,7 +162,25 @@ func trimList(in []string) []string {
 	return out
 }
 
+func (s *Server) detectWindowCapacity() time.Duration {
+	if s.det != nil {
+		return s.det.MaxWindow()
+	}
+	return detector.DefaultMaxWindow
+}
+
+func (s *Server) validateRuleActivation(when config.When, enabled bool) error {
+	if when.MaxWindow() > s.detectWindowCapacity() {
+		return fmt.Errorf("规则窗口超过当前容量 %s，未应用修改", s.detectWindowCapacity())
+	}
+	if enabled && when.MaxWindow() == 0 && !geoip.Global().Loaded() {
+		return fmt.Errorf("这条规则只有 GeoIP 条件。GeoIP 数据库未加载，请先配置 GeoIP，或保存为停用")
+	}
+	return nil
+}
+
 func (s *Server) apiDetectRules(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	rows, err := s.st.ListDetectRules()
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
@@ -163,10 +190,16 @@ func (s *Server) apiDetectRules(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		a, err := rowToAPI(row)
 		if err != nil {
-			// 坏数据跳过,前端少展示一条而已,不让整页崩
-			continue
+			a = &detectRuleAPI{Name: row.Name, Desc: row.Desc, Enabled: row.Enabled, SortOrder: row.SortOrder, UpdatedTS: row.UpdatedTS.Unix(), Issue: "现有条件无法读取，请检查或重新编辑"}
+		} else if _, err := apiToWhen(a); err != nil {
+			a.Issue = err.Error()
 		}
 		out = append(out, a)
+	}
+	if r.URL.Query().Get("view") == "editor" {
+		writeJSON(w, 200, map[string]any{"rules": out, "geoip_ready": geoip.Global().Loaded(),
+			"max_window_sec": int(s.detectWindowCapacity().Seconds()), "resolution_sec": int(detector.WindowResolution.Seconds())})
+		return
 	}
 	writeJSON(w, 200, out)
 }
@@ -180,11 +213,12 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		detectRuleAPI
 		OriginalName string `json:"original_name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, 400, map[string]any{"error": err.Error()})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "规则内容无效"})
 		return
 	}
 	body.Name = strings.TrimSpace(body.Name)
+	body.Desc = strings.TrimSpace(body.Desc)
 	if body.Name == "" {
 		writeJSON(w, 400, map[string]any{"error": "规则名必填"})
 		return
@@ -194,8 +228,8 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if s.det != nil && when.MaxWindow() > s.det.MaxWindow() {
-		writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("规则窗口超过当前容量 %s，未保存修改", s.det.MaxWindow())})
+	if err := s.validateRuleActivation(when, body.Enabled); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
 	buf, err := json.Marshal(when)
@@ -221,6 +255,67 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiDetectRuleState changes only the enabled bit, preserving the original rule.
+func (s *Server) apiDetectRuleState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		Name    string `json:"name"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" || body.Enabled == nil {
+		writeJSON(w, 400, map[string]any{"error": "必须提供规则名称和启用状态"})
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	if *body.Enabled {
+		rows, err := s.st.ListDetectRules()
+		if err != nil {
+			writePolicyError(w, err)
+			return
+		}
+		found := false
+		for _, row := range rows {
+			if row.Name != name {
+				continue
+			}
+			found = true
+			a, err := rowToAPI(row)
+			if err != nil {
+				writeJSON(w, 400, map[string]any{"error": "无法读取规则条件，请先编辑修正"})
+				return
+			}
+			when, err := apiToWhen(a)
+			if err == nil {
+				err = s.validateRuleActivation(when, true)
+			}
+			if err != nil {
+				writeJSON(w, 400, map[string]any{"error": err.Error()})
+				return
+			}
+			break
+		}
+		if !found {
+			writePolicyError(w, store.ErrRecordNotFound)
+			return
+		}
+	}
+	if err := s.st.SetDetectRuleEnabled(name, *body.Enabled); err != nil {
+		writePolicyError(w, err)
+		return
+	}
+	if err := s.reloadDetectRules(); err != nil {
+		s.logger.Error("reload toggled detect rule", "err", err)
+		writeJSON(w, 500, map[string]any{"error": "状态已保存，但运行时规则刷新失败"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "enabled": *body.Enabled})
 }
 
 func (s *Server) apiDetectRuleRemove(w http.ResponseWriter, r *http.Request) {

@@ -10,7 +10,9 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/slidingwin"
 )
 
-// 风控规则不分等级，命中后由网关拒绝请求。
+// Sliding windows count requests in fixed-width time buckets.
+const WindowResolution = time.Minute
+const DefaultMaxWindow = 24 * time.Hour
 
 type Detector struct {
 	cfg         *config.DetectorCfg
@@ -56,11 +58,11 @@ func (d *Detector) SetDynamicIPWhitelist(fn func(string) bool) {
 
 func New(cfg *config.DetectorCfg) (*Detector, error) {
 	// Keep sufficient history for rules added through the UI without a restart.
-	maxWindow := 24 * time.Hour
+	maxWindow := DefaultMaxWindow
 	for _, r := range cfg.Rules {
 		maxWindow = max(maxWindow, r.When.MaxWindow())
 	}
-	bucket := time.Minute
+	bucket := WindowResolution
 
 	d := &Detector{
 		cfg:         cfg,
