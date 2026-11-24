@@ -35,32 +35,43 @@ const ACTION_CN = {
   display: '展示改写',
   display_failed: '展示处理失败',
 };
-function actionLabel(a) { return ACTION_CN[a] || a || '-'; }
+function actionClass(a) {
+  const key = String(a || '').trim().toLowerCase();
+  return Object.hasOwn(ACTION_CN, key) ? key : 'empty';
+}
+function actionLabel(a) { return ACTION_CN[actionClass(a)] || a || '—'; }
 
 // tag 中文翻译。带 `:` 的 tag(如 bl_oversea:US / cloud_ip:aws / token_freq=10>=5 window=60s)
 // 拆开拼:前缀翻译 + 后缀(国家/服务商/数值)原样附加。
 const TAG_PREFIX_CN = {
   // 全局黑名单
-  'bl_oversea':     '黑名单·海外',
-  'bl_cloud':       '黑名单·云厂商',
-  'bl_cn_idc':      '黑名单·国内IDC',
-  'bl_browser':     '黑名单·浏览器直访',
-  'bl_isp':         '黑名单·运营商',
-  // 白名单 / 路径
-  'ip_whitelist':   '白名单放行',
-  'banlist_ip':     'IP 黑名单',
+  'bl_oversea': '全局策略：海外来源',
+  'bl_cloud': '全局策略：云厂商 IP',
+  'bl_cn_idc': '全局策略：国内数据中心',
+  'bl_browser': '全局策略：浏览器直访',
+  'bl_isp': '全局策略：运营商关键字',
+  'ip_whitelist': 'IP 白名单放行',
+  'ua_blacklist': 'UA 黑名单拦截',
+  'banlist_ip': 'IP 黑名单拦截',
+  'detector_window': '触发滑窗规则',
   'passthrough_all': '全局跳过风控',
   'lumi_encrypt': 'Lumi 兼容处理',
   'encrypt_failed': 'Lumi 加密失败',
   'decode_failed': '订阅解压失败',
   'body_too_large': '订阅正文过大',
+  'no_proxy': '未配置可用上游',
+  'display_rewrite': '已应用订阅展示规则',
+  'display_nomatch': '未匹配订阅展示规则',
+  'path_not_match': '未匹配订阅路径',
   // 上游
   'upstream_bad':   '上游异常',
   // 触发规则
-  'token_freq':           '单 token 频次',
-  'ip_freq':              '单 IP 频次',
-  'token_distinct_ips':   '单 token 多 IP',
-  'ip_distinct_tokens':   '单 IP 多 token',
+  'token_freq': '单订阅拉取频次',
+  'ip_freq': '单 IP 拉取频次',
+  'token_distinct_ips': '单订阅多 IP',
+  'ip_distinct_tokens': '单 IP 多订阅',
+  'token_freq_extreme': '单订阅高频拉取',
+  'token_multi_ip': '单订阅多 IP',
   'cloud_ip':             '命中云厂商',
   'country_in':           '国家命中',
   'country_not_in':       '国家排除',
@@ -90,21 +101,20 @@ function usageLabel(u) {
   return USAGE_LABEL[k] || u;
 }
 
+function tagKey(t) { return String(t || '').trim().split(/[:=]/, 1)[0].trim().toLowerCase(); }
 function tagLabel(t) {
-  if (!t) return '';
-  // 处理 token_freq=10>=5 window=60s 这种带 = 的格式
-  const eqIdx = t.indexOf('=');
-  if (eqIdx > 0) {
-    const head = t.slice(0, eqIdx);
-    if (TAG_PREFIX_CN[head]) return TAG_PREFIX_CN[head] + ' ' + t.slice(eqIdx + 1);
+  const raw = String(t || '').trim();
+  const key = tagKey(raw);
+  if (!Object.hasOwn(TAG_PREFIX_CN, key)) {
+    if (key.startsWith('fmt_')) return '订阅格式：' + raw.slice(4);
+    return raw; // Keep administrator-defined rule names intact.
   }
-  // 处理 bl_oversea:US / cloud_ip:aws / banlist_ip:reason 这种带 : 的
-  const colonIdx = t.indexOf(':');
-  if (colonIdx > 0) {
-    const head = t.slice(0, colonIdx);
-    if (TAG_PREFIX_CN[head]) return TAG_PREFIX_CN[head] + '(' + t.slice(colonIdx + 1) + ')';
-  }
-  return TAG_PREFIX_CN[t] || t;
+  const i = raw.search(/[:=]/);
+  const suffix = i < 0 ? '' : raw.slice(i + 1).trim();
+  const label = TAG_PREFIX_CN[key];
+  if (!suffix) return label;
+  const detail = suffix.toLowerCase() === 'unknown' ? '未知' : suffix.replace('>=', '≥').replace(/\bwindow=/, '窗口 ');
+  return `${label}（${detail}）`;
 }
 
 let toastTimer;
@@ -189,7 +199,7 @@ const TAB_LOADERS = {
   'display-rules': () => loadDisplayRules(),
   'cloud-ip': () => loadGeoIPInfo(),
   'detect-rules': () => loadRulesTable(),
-  'suspects': () => loadSuspects(),
+  'suspects': () => Promise.all([loadSuspects(), loadDeniedRanking(true)]),
   'tenants': () => loadTenantsTable(),
   'settings': () => Promise.all([loadSettings(), loadPassthrough(), loadReportSecret()]),
 };
@@ -341,12 +351,12 @@ function renderEventCard(e) {
     ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="标记此 token 为已处理,后续不再出现">已处理</button>`
     : '';
   // 重置滑窗按钮:把此 token 在风控滑窗里的累计计数清掉,把它"拉出来"。
-  const resetBtn = (tokenFull && e.Action === 'deny')
+  const resetBtn = (tokenFull && actionClass(e.Action) === 'deny' && (e.RuleTags || []).some(t => tagKey(t) === 'detector_window'))
     ? `<button class="ev-reset" data-token="${escapeHTML(tokenFull)}" title="清除该订阅的频率累计，不解除名单或规则限制">重置窗口</button>`
     : '';
   card.innerHTML = `
     <div class="ev-card-head">
-      <span class="pill ${e.Action || ''}">${escapeHTML(actionLabel(e.Action))}</span>
+      <span class="pill ${actionClass(e.Action)}">${escapeHTML(actionLabel(e.Action))}</span>
       <span class="ev-time mono">${escapeHTML(fmtTime(e.TS))}</span>
       <span class="ev-status mono">HTTP ${e.Status || '—'}</span>
       <span class="ev-spacer"></span>
@@ -438,7 +448,6 @@ async function loadEvents(append = false) {
       show_whitelist: $('#evShowWL').checked ? '1' : '0',
     }) };
     setEventEmpty('正在查询请求日志…');
-    loadEvTopIP(evPage);
   }
   const page = evPage;
   const q = new URLSearchParams(page.query);
@@ -471,6 +480,22 @@ async function loadEvents(append = false) {
   updateEvMore();
 }
 
+function openRequestView({ip = '', token = '', action = '', tenant, window: range} = {}) {
+  $('#evIP').value = ip;
+  $('#evToken').value = token;
+  $('#evAction').value = action;
+  for (const id of ['#evUsage', '#evUA']) $(id).value = '';
+  $('#evShowWL').checked = true;
+  if (tenant !== undefined) {
+    const select = $('#tenantSel');
+    select.value = tenant;
+    state.tenant = select.value;
+  }
+  if (range) { $('#windowSel').value = range; state.window = $('#windowSel').value || '24h'; }
+  if (activeTab === 'events') loadEvents();
+  else $('.navlink[data-tab="events"]').click();
+}
+
 function setEventEmpty(message) {
   const row = document.createElement('div');
   row.className = 'empty-state';
@@ -484,7 +509,10 @@ function updateEvMore() {
   btn.textContent = evPage.loading ? '正在加载…' : `加载更多 · 已显示 ${evPage.count} 条`;
 }
 $('#evMoreBtn').addEventListener('click', () => loadEvents(true));
-$('#evQuery').addEventListener('click', e => withLoading(e.currentTarget, () => loadEvents()));
+$('#evFilterForm').addEventListener('submit', e => {
+  e.preventDefault();
+  withLoading($('#evQuery'), () => loadEvents());
+});
 
 // 清空日志:针对当前选中的机场;选"全部机场"时清全部。
 // 二次确认 + 显示删了多少行。
@@ -550,7 +578,7 @@ async function loadResolved() {
       <td>${escapeHTML(r.tenant || '-')}</td>
       <td>${escapeHTML(r.note || '-')}</td>
       <td class="mono">${escapeHTML(fmtTime(new Date(r.resolved_ts)))}</td>
-      <td><button class="danger res-restore" data-token="${escapeHTML(r.token)}">恢复</button></td>
+      <td><button class="danger res-restore" data-token="${escapeHTML(r.token)}" data-tenant="${escapeHTML(r.tenant)}">恢复</button></td>
     `;
     tbody.appendChild(tr);
   }
@@ -560,7 +588,7 @@ $('#resolvedTbody')?.addEventListener('click', async (e) => {
   const btn = e.target.closest('.res-restore');
   if (!btn) return;
   if (!confirm('恢复后此 token 将重新出现在请求日志里,确定?')) return;
-  const r = await apiPost('/api/resolved/remove', { token: btn.dataset.token });
+  const r = await apiPost('/api/resolved/remove', { token: btn.dataset.token, tenant: btn.dataset.tenant });
   if (r && r.ok) loadResolved();
   else alert('恢复失败:' + (r && r.error ? r.error : '未知错误'));
 });
@@ -572,125 +600,180 @@ $('#resolvedClearAll')?.addEventListener('click', async () => {
   else alert('清空失败:' + (r && r.error ? r.error : '未知错误'));
 });
 
-// ---- 请求日志页顶部:异常 IP Top 20(复用 /api/incidents/agg_ip) ----
-async function loadEvTopIP(page) {
-  const q = new URLSearchParams({
-    tenant: page.query.get('tenant'), window: page.query.get('window'), limit: '20',
-    action: page.query.get('action'),
-  });
-  const tbody = $('#evTopIPTbody');
-  setEmptyRow(tbody, '正在统计异常 IP…');
-  const aggs = await api('/api/incidents/agg_ip?' + q);
-  if (page !== evPage) return;
+// Refused requests are ranked once per scope, independently of log pagination.
+let rankingRequest = 0;
+let rankingKey = '';
+async function loadDeniedRanking(force = false) {
+  if (!$('#suspectIPRanking').open) return;
+  const q = new URLSearchParams({tenant: state.tenant, window: $('#suspectWindow').value, limit: '20', action: 'deny'});
+  if (!force && rankingKey === q.toString()) return;
+  rankingKey = q.toString();
+  const request = ++rankingRequest;
+  const tbody = $('#suspectRankingTbody');
+  setEmptyRow(tbody, '正在聚合拒绝请求…');
+  const rows = await api('/api/incidents/agg_ip?' + q);
+  if (request !== rankingRequest) return;
   tbody.replaceChildren();
-  if (!aggs?.length) { setEmptyRow(tbody, aggs ? '当前范围内没有异常 IP' : '统计加载失败'); return; }
-  for (const a of aggs) {
-    const tr = document.createElement('tr');
-    const actsHTML = (a.actions || [])
-      .map(x => `<span class="pill ${x}">${escapeHTML(actionLabel(x))}</span>`).join(' ');
-    const tagsHTML = (a.tags || []).map(t => `<code title="${escapeHTML(t)}">${escapeHTML(tagLabel(t))}</code>`).join(' ');
-    tr.innerHTML = `
-      <td class="mono">${escapeHTML(a.client_ip)}</td>
-      <td style="text-align:right" class="mono"><strong>${a.count}</strong></td>
-      <td>${actsHTML}</td>
-      <td class="mono" style="font-size:11.5px">${tagsHTML}</td>
-      <td class="mono" style="white-space:nowrap">${escapeHTML(fmtTime(new Date(a.last_ts)))}</td>
-      <td>
-        <button class="btn-mini" data-ip="${escapeHTML(a.client_ip)}" data-act="filter">看详情</button>
-        <button class="danger btn-mini" data-ip="${escapeHTML(a.client_ip)}" data-act="ban">封禁</button>
-      </td>
-    `;
-    tbody.appendChild(tr);
+  if (!Array.isArray(rows)) {
+    rankingKey = '';
+    setEmptyRow(tbody, '异常 IP 统计读取失败，请点击刷新重试。');
+    return;
   }
-  $$('#evTopIPTbody button[data-act="filter"]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      $('#evIP').value = btn.dataset.ip;
-      loadEvents();
-    });
-  });
-  $$('#evTopIPTbody button[data-act="ban"]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const ip = btn.dataset.ip;
-      if (!confirm('封禁 ' + ip + ' ?')) return;
-      const r = await apiPost('/api/bans/add', { kind: 'ip', target: ip, reason: '请求日志页手动封禁' });
-      if (r && r.ok) { toast('已封禁 ' + ip, 'success'); }
-      else { toast((r && r.error) || '封禁失败', 'error'); }
-    });
-  });
-}
-
-// ---- bans (仅 IP,token 黑名单已废弃) ----
-async function loadBans() {
-  const [, bs] = await Promise.all([loadBlacklistCfg(), api('/api/bans')]);
-  if (!bs) return;
-  const ipTbody = $('#ipBanTbody'); ipTbody.innerHTML = '';
-  let ipCount = 0;
-  for (const b of bs || []) {
-    if (b.Kind !== 'ip') continue;  // 兼容老库残留的 token 行,直接跳过
-    const exp = b.ExpiresTS ? fmtTime(b.ExpiresTS) : '<span style="color:var(--danger)">永久</span>';
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="mono" title="${escapeHTML(b.Target)}">${escapeHTML(b.Target)}</td>
-      <td>${escapeHTML(b.Reason || '')}</td>
-      <td class="mono" title="${escapeHTML((b.RuleTags || []).join(','))}">${escapeHTML((b.RuleTags || []).map(tagLabel).join(','))}</td>
-      <td class="mono" style="white-space:nowrap">${escapeHTML(fmtTime(b.CreatedTS))}</td>
-      <td class="mono" style="white-space:nowrap">${exp}</td>
-      <td><span class="pill ${b.CreatedBy === 'auto' ? 'red' : ''}">${b.CreatedBy === 'auto' ? '自动' : (b.CreatedBy === 'manual' ? '手动' : escapeHTML(b.CreatedBy))}</span></td>
-      <td><button class="danger" data-kind="${escapeHTML(b.Kind)}" data-target="${escapeHTML(b.Target)}">解封</button></td>
-    `;
-    ipTbody.appendChild(tr); ipCount++;
+  if (!rows.length) { setEmptyRow(tbody, '这个范围内没有被拒绝的请求。'); return; }
+  for (const row of rows) {
+    const ip = escapeHTML(row.client_ip);
+    const tags = [...new Set((row.tags || []).map(tagLabel))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    const tr = tbody.insertRow();
+    tr.innerHTML = `<td class="mono">${ip}</td><td class="numeric"><strong>${Number(row.count)}</strong></td>
+      <td>${tags.length ? tags.map(t => `<span class="pill tag">${escapeHTML(t)}</span>`).join('') : '—'}</td>
+      <td class="nowrap">${escapeHTML(fmtTime(row.last_ts))}</td><td><div class="table-actions">
+      <button type="button" data-rank-action="logs" data-ip="${ip}">查看拒绝日志</button>
+      <button type="button" class="danger" data-rank-action="ban" data-ip="${ip}">去封禁</button></div></td>`;
   }
-  if (!ipCount) setEmptyRow(ipTbody, '当前没有封禁的 IP');
-  $$('#ipBanTbody button.danger').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('解封 ' + btn.dataset.target + ' ?')) return;
-      const r = await apiPost('/api/bans/remove', { kind: btn.dataset.kind, target: btn.dataset.target });
-      if (r && r.ok) { toast('已解封', 'success'); loadBans(); }
-      else toast((r && r.error) || '失败', 'error');
-    });
-  });
 }
-
-$('#banIPAddBtn').addEventListener('click', async () => {
-  const target = $('#banIPTarget').value.trim();
-  if (!target) return toast('IP 不能为空', 'error');
-  const r = await apiPost('/api/bans/add', {
-    kind: 'ip', target,
-    reason: $('#banIPReason').value.trim(),
-    ttl: $('#banIPTTL').value.trim(),
-  });
-  if (r && r.ok) {
-    $('#banIPTarget').value = ''; $('#banIPReason').value = ''; $('#banIPTTL').value = '';
-    toast('已添加', 'success'); loadBans();
-  } else toast((r && r.error) || '失败', 'error');
+$('#suspectIPRanking').addEventListener('toggle', () => loadDeniedRanking());
+$('#suspectRankingTbody').addEventListener('click', e => {
+  const btn = e.target.closest('[data-rank-action]');
+  if (!btn) return;
+  const ip = btn.dataset.ip;
+  if (btn.dataset.rankAction === 'logs') {
+    openRequestView({ip, tenant: state.tenant, action: 'deny', window: $('#suspectWindow').value});
+  } else {
+    $('.navlink[data-tab="ip-bans"]').click();
+    $('#banIPTarget').value = ip;
+    $('#banIPReason').value = '异常 IP 排行人工确认';
+    $('#banIPTarget').focus();
+  }
 });
 
-// token 黑名单已废弃(v2board 重置 token 后 hash 失效),不再注册按钮。
-
-// ---- 全局黑名单配置(海外/云/ISP/浏览器)----
-async function loadBlacklistCfg() {
-  const btn = $('#blSaveBtn');
-  btn.disabled = true;
-  const cfg = await api('/api/blacklist');
-  if (!cfg) return;
-  $('#blOversea').checked = !!cfg.oversea_enabled;
-  $('#blCloud').checked = !!cfg.cloud_enabled;
-  $('#blCNIDC').checked = !!cfg.cn_idc_enabled;
-  $('#blBrowser').checked = !!cfg.browser_enabled;
-  $('#blISPKw').value = (cfg.isp_keywords || []).join(', ');
-  btn.disabled = false;
+// ---- bans (仅 IP,token 黑名单已废弃) ----
+function loadBans() { return Promise.all([loadBlacklistCfg(), loadIPBans()]); }
+let bansData = null;
+let bansRequest = 0;
+async function loadIPBans() {
+  const request = ++bansRequest;
+  if (bansData === null) setEmptyRow($('#ipBanTbody'), '正在加载封禁名单…');
+  const result = await requestJSON('/api/bans');
+  if (request !== bansRequest || result === null) return;
+  if (!Array.isArray(result)) {
+    $('#banSummary').textContent = '封禁名单加载失败';
+    if (bansData === null) setEmptyRow($('#ipBanTbody'), '读取失败，请点击刷新重试。');
+    else $('#banSummary').textContent = '加载失败，正在显示上次读取的名单。';
+    toast(result.error || '封禁名单格式有误', 'error');
+    return;
+  }
+  bansData = result;
+  renderIPBans();
 }
-$('#blSaveBtn').addEventListener('click', async () => {
-  const kw = $('#blISPKw').value.split(',').map(s => s.trim()).filter(Boolean);
-  const r = await apiPost('/api/blacklist/save', {
-    oversea_enabled: $('#blOversea').checked,
-    cloud_enabled: $('#blCloud').checked,
-    cn_idc_enabled: $('#blCNIDC').checked,
-    browser_enabled: $('#blBrowser').checked,
-    isp_keywords: kw,
+function renderIPBans() {
+  if (!bansData) return;
+  const term = $('#banSearch').value.trim().toLowerCase();
+  const scope = $('#banScope').value;
+  const permanent = bansData.filter(b => !b.ExpiresTS).length;
+  const rows = bansData.filter(b => (scope === 'all' || (scope === 'permanent') === !b.ExpiresTS) &&
+    (!term || [b.Target, b.Reason].some(x => (x || '').toLowerCase().includes(term))));
+  $('#banSummary').textContent = `共 ${bansData.length} 条 · 临时 ${bansData.length - permanent} · 永久 ${permanent}` +
+    (term || scope !== 'all' ? ` · 当前显示 ${rows.length} 条` : '');
+  const tbody = $('#ipBanTbody'); tbody.replaceChildren();
+  if (!rows.length) { setEmptyRow(tbody, bansData.length ? '没有符合筛选条件的封禁。' : '暂无生效中的 IP 封禁。'); return; }
+  for (const b of rows) {
+    const tr = tbody.insertRow();
+    const exp = b.ExpiresTS ? `<time datetime="${escapeHTML(b.ExpiresTS)}">${escapeHTML(fmtTime(b.ExpiresTS))}</time>` : '<span class="pill empty">永久</span>';
+    const source = {manual: '手动', auto: '自动'}[b.CreatedBy] || b.CreatedBy || '—';
+    tr.innerHTML = `<td class="mono">${escapeHTML(b.Target)}</td><td>${escapeHTML(b.Reason || '—')}</td>
+      <td class="nowrap">${escapeHTML(fmtTime(b.CreatedTS))}</td><td class="nowrap">${exp}</td>
+      <td><span class="pill state-soft">${escapeHTML(source)}</span></td><td><div class="table-actions">
+        <button type="button" data-ban-action="logs" data-ip="${escapeHTML(b.Target)}">查看日志</button>
+        <button type="button" class="danger" data-ban-action="remove" data-ip="${escapeHTML(b.Target)}">解封</button>
+      </div></td>`;
+  }
+}
+$('#banSearch').addEventListener('input', renderIPBans);
+$('#banScope').addEventListener('change', renderIPBans);
+$('#ipBanTbody').addEventListener('click', e => {
+  const button = e.target.closest('button[data-ban-action]');
+  if (!button) return;
+  const ip = button.dataset.ip;
+  if (button.dataset.banAction === 'logs') { openRequestView({ip, tenant: ''}); return; }
+  if (!confirm(`确定解除对 ${ip} 的 IP 封禁？其他拦截规则不受影响。`)) return;
+  withLoading(button, async () => {
+    const r = await apiPost('/api/bans/remove', { kind: 'ip', target: ip });
+    if (r?.ok) { toast('已解封', 'success'); await loadIPBans(); }
+    else if (r) toast(r.error || '解封失败', 'error');
   });
-  if (r && r.ok) toast('已保存', 'success');
-  else toast((r && r.msg) || '保存失败', 'error');
+});
+function updateBanDuration() {
+  const custom = $('#banIPDuration').value === 'custom';
+  $('#banCustomTTL').hidden = !custom;
+  $('#banIPTTL').required = custom;
+}
+$('#banIPDuration').addEventListener('change', updateBanDuration);
+$('#banIPForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const target = $('#banIPTarget').value.trim();
+  const duration = $('#banIPDuration').value;
+  const ttl = duration === 'custom' ? $('#banIPTTL').value.trim() : duration;
+  if (!target || (duration === 'custom' && !ttl)) { toast('请填写 IP 地址和封禁时长', 'error'); return; }
+  const existing = bansData?.some(b => b.Target === target);
+  if ((existing || ttl === '') && !confirm(existing ? `更新 ${target} 的原有封禁？` : `对 ${target} 永久封禁？`)) return;
+  withLoading($('#banIPAddBtn'), async () => {
+    const r = await apiPost('/api/bans/add', {kind: 'ip', target, reason: $('#banIPReason').value.trim(), ttl});
+    if (r?.ok) {
+      $('#banIPForm').reset(); updateBanDuration();
+      toast(existing ? '封禁已更新' : '已添加封禁', 'success');
+      await loadIPBans();
+    } else if (r) toast(r.error || '添加失败', 'error');
+  });
+});
+
+// Global policy drafts are independent of the manual IP list.
+const blControls = {oversea_enabled: '#blOversea', cloud_enabled: '#blCloud', cn_idc_enabled: '#blCNIDC', browser_enabled: '#blBrowser'};
+let blSaved = null;
+let blBusy = false;
+function readBlacklistForm() {
+  const cfg = {};
+  for (const [field, selector] of Object.entries(blControls)) cfg[field] = $(selector).checked;
+  cfg.isp_keywords = [...new Set($('#blISPKw').value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean))];
+  return cfg;
+}
+function writeBlacklistForm(cfg) {
+  for (const [field, selector] of Object.entries(blControls)) $(selector).checked = Boolean(cfg[field]);
+  $('#blISPKw').value = (cfg.isp_keywords || []).join(', ');
+}
+function updateBlacklistState() {
+  const status = $('#blStatus');
+  const changed = blSaved !== null && JSON.stringify(readBlacklistForm()) !== JSON.stringify(blSaved);
+  $('#blSaveBtn').disabled = $('#blResetBtn').disabled = !changed || blBusy;
+  status.className = 'pill ' + (changed ? 'state-warning' : 'state-soft');
+  status.textContent = blBusy ? '处理中…' : changed ? '有未保存的修改' : blSaved ? '已与运行状态同步' : '读取失败，请刷新';
+  return changed;
+}
+async function loadBlacklistCfg() {
+  if (blBusy || (blSaved && updateBlacklistState())) return;
+  blBusy = true;
+  $('#blFields').disabled = true;
+  updateBlacklistState();
+  const cfg = await api('/api/blacklist');
+  blBusy = false;
+  if (cfg) { writeBlacklistForm(cfg); blSaved = readBlacklistForm(); }
+  $('#blFields').disabled = !blSaved;
+  updateBlacklistState();
+}
+$('#blForm').addEventListener('input', updateBlacklistState);
+$('#blResetBtn').addEventListener('click', () => { if (blSaved) writeBlacklistForm(blSaved); updateBlacklistState(); });
+$('#blForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (blBusy || !updateBlacklistState()) return;
+  const draft = readBlacklistForm();
+  blBusy = true;
+  $('#blFields').disabled = true;
+  updateBlacklistState();
+  const r = await apiPost('/api/blacklist/save', draft);
+  blBusy = false;
+  $('#blFields').disabled = false;
+  if (r?.ok) { blSaved = draft; writeBlacklistForm(draft); toast('策略已保存并生效', 'success'); }
+  else if (r) toast(r.error || r.msg || '保存策略失败', 'error');
+  updateBlacklistState();
 });
 
 // ---- IP 白名单 ----
@@ -1408,277 +1491,140 @@ function fmtBytes(b) {
   return v.toFixed(i > 1 ? 1 : 0) + ' ' + units[i];
 }
 
+const SUSPECT_PAGE_SIZE = 20;
 let suspectsRequest = 0;
-async function loadSuspects() {
+let suspectOffset = 0;
+let suspectSearchTimer;
+async function loadSuspects(offset = 0) {
+  clearTimeout(suspectSearchTimer);
   const request = ++suspectsRequest;
-  const q = new URLSearchParams({
-    tenant: state.tenant,
-    window: $('#suspectWindow').value || '168h',
-  });
-  const rows = await api('/api/suspects?' + q);
-  if (request !== suspectsRequest || !rows) return;
-  window._suspectsData = rows;
-  renderSuspects();
-}
-
-function renderSuspects() {
-  let rows = window._suspectsData || [];
-  const list = $('#suspectsList'); list.innerHTML = '';
-
-  // 搜索过滤
-  const search = ($('#suspectSearch').value || '').trim().toLowerCase();
-  if (search) {
-    rows = rows.filter(r =>
-      (r.token || '').toLowerCase().includes(search) ||
-      (r.email || '').toLowerCase().includes(search) ||
-      (r.last_ip || '').toLowerCase().includes(search)
-    );
-  }
-
-  // 排序
-  const sort = $('#suspectSort').value;
-  rows = [...rows].sort((a, b) => {
-    if (sort === 'pull') return b.pull_count - a.pull_count;
-    if (sort === 'uas') return b.distinct_uas - a.distinct_uas || b.distinct_ips - a.distinct_ips;
-    if (sort === 'usage') {
-      const ra = a.traffic_total > 0 ? a.traffic_used / a.traffic_total : 2;
-      const rb = b.traffic_total > 0 ? b.traffic_used / b.traffic_total : 2;
-      return ra - rb; // 低使用率排前面
-    }
-    // 默认 + ips: 独立IP 降序,同分按拉取降序
-    return b.distinct_ips - a.distinct_ips || b.pull_count - a.pull_count;
-  });
-
-  if (!rows.length) {
-    list.innerHTML = '<div class="empty-state">暂无上报数据或无匹配结果</div>';
+  const list = $('#suspectsList');
+  const status = $('#suspectResult');
+  const range = $('#suspectWindow').value;
+  list.replaceChildren();
+  list.setAttribute('aria-busy', 'true');
+  $('#suspectPager').hidden = true;
+  status.textContent = '正在统计订阅活动…';
+  const q = new URLSearchParams({view: 'review', tenant: state.tenant, window: range,
+    search: $('#suspectSearch').value.trim(), signal: $('#suspectSignal').value, sort: $('#suspectSort').value,
+    limit: String(SUSPECT_PAGE_SIZE), offset: String(offset)});
+  const result = await api('/api/suspects?' + q);
+  if (request !== suspectsRequest) return;
+  list.setAttribute('aria-busy', 'false');
+  if (!result || !Array.isArray(result.items)) {
+    status.textContent = '读取失败，请刷新重试。';
     return;
   }
-  for (const r of rows) {
-    list.appendChild(renderSuspectCard(r));
+  if (offset > 0 && result.items.length === 0) { await loadSuspects(0); return; }
+  suspectOffset = offset;
+  status.textContent = result.total ? `共 ${result.total} 条 · 第 ${offset + 1}–${offset + result.items.length} 条` : '当前筛选没有结果';
+  $('#suspectPager').hidden = result.total <= SUSPECT_PAGE_SIZE;
+  $('#suspectPrev').disabled = offset === 0;
+  $('#suspectNext').disabled = offset + result.items.length >= result.total;
+  if (!result.items.length) {
+    list.innerHTML = '<div class="card empty-state">没有符合条件的订阅记录。可换时间范围或清除筛选。</div>';
+    return;
   }
+  for (const r of result.items) list.append(renderSuspectCard(r, range));
   bindCopyHandlers(list);
 }
 
-// 嫌疑用户卡片:与请求日志 .ev-card 同款样式
-function renderSuspectCard(r) {
-  const card = document.createElement('div');
-  card.className = 'ev-card';
-  const tokenFull = r.token || '';
-  const usageRatio = r.traffic_total > 0 ? (r.traffic_used / r.traffic_total * 100) : -1;
-  // 主指标:独立 IP 数。共享/倒卖最直观的信号 → 卡片头部大号数字,按数量上色阶
-  // <5 正常(灰) / 5-9 注意(琥珀) / 10+ 高危(红)
-  const ipCls = r.distinct_ips >= 10 ? 'sus-ip-hi' : (r.distinct_ips >= 5 ? 'sus-ip-mid' : 'sus-ip-lo');
-  // 使用率 pill:<5% 红、<20% 黄、其余靛蓝
-  const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'danger' : (usageRatio < 20 ? 'yellow' : 'tag'));
-  const usageTxt = usageRatio < 0 ? '使用率 -' : usageRatio.toFixed(0) + '%';
-
+function renderSuspectCard(r, range) {
+  const card = document.createElement('article');
+  card.className = 'card review-card';
+  const id = escapeHTML(r.token);
+  const ratio = r.traffic_total > 0 ? ` · ${(r.traffic_used / r.traffic_total * 100).toFixed(0)}%` : '';
+  const traffic = r.traffic_total > 0 ? `${fmtBytes(r.traffic_used)} / ${fmtBytes(r.traffic_total)}${ratio}` : '未上报流量额度';
+  const metrics = [['成功拉取', r.pull_count], ['独立 IP', r.distinct_ips], ['UA 标识', r.distinct_uas], ['风控拒绝', r.denied]];
   card.innerHTML = `
-    <div class="ev-card-head sus-head">
-      <span class="sus-ip ${ipCls}">
-        <span class="sus-ip-num">${r.distinct_ips}</span>
-        <span class="sus-ip-lbl">独立 IP</span>
-      </span>
-      <span class="pill tag"><strong>${r.pull_count}</strong> 拉取</span>
-      <span class="pill ${usageCls}">${usageTxt}</span>
-      <span class="ev-spacer"></span>
-      <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
+    <div class="review-card-header">
+      <div class="review-identity"><h3>${escapeHTML(r.email || '未上报邮箱')}</h3><span class="pill state-soft">${escapeHTML(r.tenant)}</span>
+        ${r.multi_source ? '<span class="pill state-warning">多来源</span>' : ''}</div>
+      <button type="button" class="copyable mono" data-copy="${id}" aria-label="复制完整订阅标识">${escapeHTML(tokenShort(r.token))}</button>
     </div>
-    <div class="ev-row-full">
-      <span class="ev-label">订阅</span>
-      ${tokenFull
-        ? `<span class="mono copyable ev-token ev-token-expand" data-copy="${escapeHTML(tokenFull)}" data-full="${escapeHTML(tokenFull)}" data-short="${escapeHTML(tokenShort(tokenFull))}" title="点击展开 / 再点复制">${escapeHTML(tokenShort(tokenFull))}</span>`
-        : '<span class="muted">(无)</span>'}
+    <dl class="review-metrics">${metrics.map(([label, value]) => `<div><dt>${label}</dt><dd>${Number(value || 0).toLocaleString('zh-CN')}</dd></div>`).join('')}</dl>
+    <div class="review-card-footer">
+      <div class="section-copy">最近活动：${escapeHTML(fmtTime(r.last_activity)) || '—'}<br>上报流量：${traffic}</div>
+      <div class="table-actions">
+        <button type="button" class="sus-detail-toggle" aria-expanded="false">成功拉取明细</button>
+        <button type="button" class="sus-event-view">查看请求日志</button>
+        <button type="button" class="sus-resolve" data-token="${id}" data-tenant="${escapeHTML(r.tenant)}">标记已处理</button>
+      </div>
     </div>
-    <div class="ev-row-full">
-      <span class="ev-label">邮箱</span>
-      ${r.email ? `<span class="mono">${escapeHTML(r.email)}</span>` : '<span class="muted">(无)</span>'}
-      <span class="ev-spacer"></span>
-      <span class="muted" style="font-size:11px">${r.distinct_uas} UA · ${fmtBytes(r.traffic_used)} / ${fmtBytes(r.traffic_total)}</span>
-    </div>
-    <div class="sus-actions">
-      ${tokenFull ? `<button class="sus-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">标记已处理</button>` : ''}
-    </div>
-    <div class="suspect-detail" style="display:none"></div>
-  `;
-  card.style.cursor = 'pointer';
-  card.title = '点击展开详情';
-  card.addEventListener('click', (e) => {
-    // 排除复制、按钮、筛选框的点击
-    if (e.target.closest('.copyable') || 
-        e.target.closest('.sus-resolve') || 
-        e.target.closest('.suspect-detail')) return;
-    toggleSuspectDetail(card, r);
-  });
+    <div class="suspect-detail" hidden></div>`;
+  card.querySelector('.sus-detail-toggle').addEventListener('click', () => toggleSuspectDetail(card, r, range));
+  card.querySelector('.sus-event-view').addEventListener('click', () => openRequestView({token: r.token, tenant: r.tenant, window: range}));
   return card;
 }
 
-async function toggleSuspectDetail(card, r) {
+async function toggleSuspectDetail(card, r, range) {
   const box = card.querySelector('.suspect-detail');
-  if (!box) return;
-  // 已展开 → 收起
-  if (box.style.display !== 'none' && box.dataset.loaded) {
-    box.style.display = 'none';
-    card.title = '点击展开详情';
-    return;
-  }
-  // 收起其他已展开的
-  document.querySelectorAll('#suspectsList .suspect-detail').forEach(el => {
-    if (el !== box) { el.style.display = 'none'; }
-  });
-  document.querySelectorAll('#suspectsList .ev-card').forEach(c => {
-    if (c !== card) c.title = '点击展开详情';
-  });
-
-  box.style.display = 'block';
-  card.title = '点击收起详情';
-  if (box.dataset.loaded) return; // 已加载过,直接显示
-
-  box.innerHTML = '<div style="padding:8px 0;color:#6b7280;font-size:12px">加载中...</div>';
-
-  const q = new URLSearchParams({
-    token: r.token,
-    tenant: r.tenant,
-    window: $('#suspectWindow').value || '168h',
-  });
+  const btn = card.querySelector('.sus-detail-toggle');
+  box.hidden = !box.hidden;
+  btn.setAttribute('aria-expanded', String(!box.hidden));
+  if (box.hidden || box.dataset.loading || box.dataset.loaded) return;
+  box.dataset.loading = '1';
+  box.textContent = '正在读取成功拉取明细…';
+  const q = new URLSearchParams({token: r.token, tenant: r.tenant, window: range});
   const detail = await api('/api/suspect-detail?' + q);
-  if (!detail) { box.innerHTML = '<div style="padding:8px 0;color:#ef4444">加载失败</div>'; return; }
-
-  // 筛选栏 + 表格容器
-  const filterId = 'filter_' + Math.random().toString(36).slice(2, 9);
-  let html = `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">`;
-  html += `<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">`;
-  html += `<button id="${filterId}_clear" style="font-size:12px;padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#f9fafb;color:#6b7280;cursor:pointer">清除筛选</button>`;
-  html += `<span class="muted" style="font-size:11px;margin-left:auto;align-self:center" id="${filterId}_count"></span>`;
-  html += `</div>`;
-  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">`;
-
-  // IP 列表容器
-  html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表</div>`;
-  html += `<div id="${filterId}_ips"></div></div>`;
-
-  // UA 列表容器
-  html += `<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">UA 列表</div>`;
-  html += `<div id="${filterId}_uas"></div></div></div></div>`;
-
-  box.innerHTML = html;
+  delete box.dataset.loading;
+  if (!card.isConnected) return;
+  if (!detail) { box.textContent = '读取失败，收起后可重新展开重试。'; return; }
   box.dataset.loaded = '1';
+  if (!detail.ips?.length && !detail.uas?.length) { box.textContent = '当前范围没有成功拉取的来源明细。可在请求日志中查看拒绝记录。'; return; }
+  box.innerHTML = `
+    <div class="review-results"><p class="section-copy detail-count" role="status"></p><button type="button" class="detail-clear">清除筛选</button></div>
+    <div class="review-detail-grid"><div><h4>IP 来源</h4><div class="detail-ips datatable"></div></div><div><h4>客户端 UA</h4><div class="detail-uas datatable"></div></div></div>`;
+  const ipsContainer = box.querySelector('.detail-ips');
+  const uasContainer = box.querySelector('.detail-uas');
+  const countLabel = box.querySelector('.detail-count');
+  const clearBtn = box.querySelector('.detail-clear');
 
-  // 挂载筛选逻辑
-  const ipsContainer = box.querySelector('#' + filterId + '_ips');
-  const uasContainer = box.querySelector('#' + filterId + '_uas');
-  const countLabel = box.querySelector('#' + filterId + '_count');
-  const clearBtn = box.querySelector('#' + filterId + '_clear');
-
-  // 构建绑定关系索引
-  const bindings = detail.bindings || [];
-  const ipToUAs = {}; // {ip: [{ua, count}]}
-  const uaToIPs = {}; // {ua: [{ip, count}]}
-  for (const b of bindings) {
-    if (!ipToUAs[b.ip]) ipToUAs[b.ip] = [];
-    ipToUAs[b.ip].push({ua: b.ua, count: b.count});
-    if (!uaToIPs[b.ua]) uaToIPs[b.ua] = [];
-    uaToIPs[b.ua].push({ip: b.ip, count: b.count});
+  const ipToUAs = new Map(), uaToIPs = new Map();
+  for (const b of detail.bindings || []) {
+    if (!ipToUAs.has(b.ip)) ipToUAs.set(b.ip, new Set());
+    if (!uaToIPs.has(b.ua)) uaToIPs.set(b.ua, new Set());
+    ipToUAs.get(b.ip).add(b.ua);
+    uaToIPs.get(b.ua).add(b.ip);
   }
+  let selectedIP = '', selectedUA = '';
 
-  let selectedIP = null;
-  let selectedUA = null;
-
-  function renderIPs(ips, highlightIP) {
-    if (!ips || !ips.length) {
-      ipsContainer.innerHTML = '<div style="color:#9ca3af;font-size:11px">无匹配 IP</div>';
-      return;
-    }
-    let t = '<table style="width:100%;font-size:11.5px;border-collapse:collapse;cursor:pointer">';
-    t += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">UA数</th></tr>';
-    for (const ip of ips) {
-      const loc = ip.country || '-';
-      const isp = ip.isp || '-';
-      const usage = ip.usage_type ? usageLabel(ip.usage_type) : '-';
-      const uaCount = (ipToUAs[ip.ip] || []).length;
-      const bg = highlightIP === ip.ip ? 'background:rgba(99,102,241,0.12)' : '';
-      t += `<tr data-ip="${escapeHTML(ip.ip)}" style="border-bottom:1px solid #f3f4f6;${bg}" class="sus-ip-row"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px;color:#6366f1">${uaCount}</td></tr>`;
-    }
-    t += '</table>';
-    ipsContainer.innerHTML = t;
-
-    // 点击 IP 行 → 筛选 UA
-    ipsContainer.querySelectorAll('.sus-ip-row').forEach(row => {
-      row.addEventListener('click', (e) => {
-        e.stopPropagation(); // 阻止冒泡到卡片
-        const ip = row.dataset.ip;
-        if (selectedIP === ip) {
-          selectedIP = null;
-          renderUAs(detail.uas, null);
-          renderIPs(getFilteredIPs(), null);
-        } else {
-          selectedIP = ip;
-          selectedUA = null;
-          const relatedUAs = (ipToUAs[ip] || []).map(x => x.ua);
-          const filteredUAs = (detail.uas || []).filter(u => relatedUAs.includes(u.ua));
-          renderUAs(filteredUAs, null);
-          renderIPs(getFilteredIPs(), ip);
-        }
-      });
-    });
+  function renderDetails() {
+    const ips = (detail.ips || []).filter(x => !selectedUA || uaToIPs.get(selectedUA)?.has(x.ip));
+    const uas = (detail.uas || []).filter(x => !selectedIP || ipToUAs.get(selectedIP)?.has(x.ua));
+    const control = (kind, value, selected) => `<button type="button" class="detail-filter mono" data-filter="${kind}" data-value="${escapeHTML(value)}" aria-pressed="${selected}">${escapeHTML(value)}</button>`;
+    const table = (headers, rows) => `<table><thead><tr>${headers.map(x => `<th scope="col">${x}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty-state">无匹配记录</td></tr>`}</tbody></table>`;
+    ipsContainer.innerHTML = table(['IP 地址', '位置 / ISP', '拉取次数', '关联 UA'], ips.map(x => `<tr>
+      <td>${control('ip', x.ip, selectedIP === x.ip)}</td><td>${escapeHTML([x.country, x.isp].filter(Boolean).join(' · ') || '—')}</td>
+      <td class="numeric">${Number(x.hit_count)}</td><td class="numeric">${ipToUAs.get(x.ip)?.size || 0}</td></tr>`));
+    uasContainer.innerHTML = table(['UA', '拉取次数', '关联 IP'], uas.map(x => `<tr>
+      <td>${control('ua', x.ua, selectedUA === x.ua)}</td><td class="numeric">${Number(x.hit_count)}</td>
+      <td class="numeric">${uaToIPs.get(x.ua)?.size || 0}</td></tr>`));
+    countLabel.textContent = `${ips.length} 个 IP · ${uas.length} 种 UA` + (selectedIP || selectedUA ? ' · 已筛选关联项' : ' · 可点 IP 或 UA 交叉筛选');
+    clearBtn.disabled = !selectedIP && !selectedUA;
   }
-
-  function renderUAs(uas, highlightUA) {
-    if (!uas || !uas.length) {
-      uasContainer.innerHTML = '<div style="color:#9ca3af;font-size:11px">无匹配 UA</div>';
-      return;
-    }
-    let t = '<table style="width:100%;font-size:11.5px;border-collapse:collapse;cursor:pointer">';
-    t += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">IP数</th></tr>';
-    for (const ua of uas) {
-      const ipCount = (uaToIPs[ua.ua] || []).length;
-      const bg = highlightUA === ua.ua ? 'background:rgba(99,102,241,0.12)' : '';
-      t += `<tr data-ua="${escapeHTML(ua.ua)}" style="border-bottom:1px solid #f3f4f6;${bg}" class="sus-ua-row"><td class="mono" style="padding:3px 6px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px;color:#6366f1">${ipCount}</td></tr>`;
-    }
-    t += '</table>';
-    uasContainer.innerHTML = t;
-
-    // 点击 UA 行 → 筛选 IP
-    uasContainer.querySelectorAll('.sus-ua-row').forEach(row => {
-      row.addEventListener('click', (e) => {
-        e.stopPropagation(); // 阻止冒泡到卡片
-        const ua = row.dataset.ua;
-        if (selectedUA === ua) {
-          selectedUA = null;
-          renderIPs(getFilteredIPs(), null);
-          renderUAs(detail.uas, null);
-        } else {
-          selectedUA = ua;
-          selectedIP = null;
-          const relatedIPs = (uaToIPs[ua] || []).map(x => x.ip);
-          const filteredIPs = (detail.ips || []).filter(i => relatedIPs.includes(i.ip));
-          renderIPs(filteredIPs, null);
-          renderUAs(detail.uas, ua);
-        }
-      });
-    });
-  }
-
-  function getFilteredIPs() {
-    return detail.ips || [];
-  }
-
-  function resetFilters() {
-    selectedIP = null;
-    selectedUA = null;
-    countLabel.textContent = '';
-    renderIPs(detail.ips, null);
-    renderUAs(detail.uas, null);
-  }
-
-  clearBtn.addEventListener('click', resetFilters);
-
-  renderIPs(detail.ips, null);
-  renderUAs(detail.uas, null);
+  box.addEventListener('click', e => {
+    const filter = e.target.closest('[data-filter]');
+    if (!filter) return;
+    const {filter: kind, value} = filter.dataset;
+    if (kind === 'ip') { selectedIP = selectedIP === value ? '' : value; selectedUA = ''; }
+    else { selectedUA = selectedUA === value ? '' : value; selectedIP = ''; }
+    renderDetails();
+    [...box.querySelectorAll('[data-filter]')].find(x => x.dataset.filter === kind && x.dataset.value === value)?.focus();
+  });
+  clearBtn.addEventListener('click', () => { selectedIP = selectedUA = ''; renderDetails(); btn.focus(); });
+  renderDetails();
 }
 
-$('#suspectWindow').addEventListener('change', () => loadSuspects());
-$('#suspectSort').addEventListener('change', () => renderSuspects());
-$('#suspectSearch').addEventListener('input', () => renderSuspects());
+$('#suspectWindow').addEventListener('change', () => { loadSuspects(); loadDeniedRanking(); });
+for (const id of ['#suspectSort', '#suspectSignal']) $(id).addEventListener('change', () => loadSuspects());
+$('#suspectSearch').addEventListener('input', () => {
+  clearTimeout(suspectSearchTimer);
+  ++suspectsRequest;
+  suspectSearchTimer = setTimeout(() => loadSuspects(), 250);
+});
+$('#suspectPrev').addEventListener('click', () => loadSuspects(Math.max(0, suspectOffset - SUSPECT_PAGE_SIZE)));
+$('#suspectNext').addEventListener('click', () => loadSuspects(suspectOffset + SUSPECT_PAGE_SIZE));
 
 // 嫌疑卡片"已处理"按钮:事件委托
 $('#suspectsList').addEventListener('click', async (e) => {
@@ -1687,10 +1633,13 @@ $('#suspectsList').addEventListener('click', async (e) => {
   e.stopPropagation();
   const token = btn.dataset.token;
   const tenant = btn.dataset.tenant || '';
-  const note = prompt(`标记 token 为已处理(备注可选):\n\n${token}`, '');
+  const note = prompt('仅将该机场下的订阅标记为已处理。可填写备注：', '');
   if (note === null) return;
-  const r = await apiPost('/api/resolved/add', { token, tenant, note });
-  if (r && r.ok) loadSuspects();
+  await withLoading(btn, async () => {
+    const r = await apiPost('/api/resolved/add', {token, tenant, note});
+    if (r?.ok) { toast('已标记为已处理', 'success'); await loadSuspects(suspectOffset); }
+    else if (r) toast(r.error || '标记失败', 'error');
+  });
 });
 
 // Shared view helpers

@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -497,20 +498,21 @@ func (s *Server) apiResolvedAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// apiResolvedRemove POST /api/resolved/remove  body:{token}
+// apiResolvedRemove POST /api/resolved/remove  body:{token, tenant}.
 func (s *Server) apiResolvedRemove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 		return
 	}
 	var body struct {
-		Token string `json:"token"`
+		Token  string `json:"token"`
+		Tenant string `json:"tenant"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, 400, map[string]any{"error": err.Error()})
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+		writeJSON(w, 400, map[string]any{"error": "订阅标识不能为空"})
 		return
 	}
-	if err := s.st.RemoveResolvedToken(r.Context(), s.hasher.Lookup(body.Token)); err != nil {
+	if err := s.st.RemoveResolvedToken(r.Context(), s.hasher.Lookup(body.Token), body.Tenant); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
@@ -561,13 +563,10 @@ func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {
 
 // apiIncidentsAggIP 异常事件按 IP 聚合 Top N。
 func (s *Server) apiIncidentsAggIP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	winStr := q.Get("window")
-	dur, _ := time.ParseDuration(winStr)
-	if dur <= 0 {
-		dur = 7 * 24 * time.Hour
-	}
+	dur := suspectWindow(q.Get("window"))
 	f := store.IncidentFilter{
 		Tenant:   q.Get("tenant"),
 		Severity: q.Get("severity"),
@@ -577,7 +576,9 @@ func (s *Server) apiIncidentsAggIP(w http.ResponseWriter, r *http.Request) {
 		Since:    s.statsSince(dur),
 		Limit:    limit,
 	}
-	out, err := s.st.AggIncidentsByIP(r.Context(), f)
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	out, err := s.st.AggIncidentsByIP(ctx, f)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -596,7 +597,13 @@ func (s *Server) apiBans(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, bs)
+	active := make([]store.Ban, 0, len(bs))
+	for _, b := range bs {
+		if b.Kind == "ip" {
+			active = append(active, b)
+		}
+	}
+	writeJSON(w, 200, active)
 }
 
 func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
@@ -614,20 +621,22 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if body.Target == "" {
-		writeJSON(w, 400, map[string]any{"error": "target is required"})
+	ip, err := netip.ParseAddr(strings.TrimSpace(body.Target))
+	if err != nil || ip.Zone() != "" || ip.IsUnspecified() {
+		writeJSON(w, 400, map[string]any{"error": "请输入有效的单个 IPv4 或 IPv6 地址"})
 		return
 	}
+	body.Target = ip.Unmap().String()
+	body.Reason = strings.TrimSpace(body.Reason)
 	var ttl time.Duration
-	if body.TTL != "" {
-		t, err := time.ParseDuration(body.TTL)
-		if err != nil {
-			writeJSON(w, 400, map[string]any{"error": "bad ttl: " + err.Error()})
+	if raw := strings.TrimSpace(body.TTL); raw != "" {
+		t, err := time.ParseDuration(raw)
+		if err != nil || t <= 0 {
+			writeJSON(w, 400, map[string]any{"error": "封禁时长必须大于 0，例如 30m、24h 或 168h；留空表示永久"})
 			return
 		}
 		ttl = t
 	}
-	var err error
 	switch body.Kind {
 	case "ip":
 		err = s.bans.AddIP(body.Target, body.Reason, ttl, nil, "manual")
@@ -1098,7 +1107,7 @@ func (s *Server) apiBlacklist(w http.ResponseWriter, r *http.Request) {
 // apiBlacklistSave 保存黑名单配置(整体覆盖)。
 func (s *Server) apiBlacklistSave(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
 		return
 	}
 	if s.bl == nil {
@@ -1106,24 +1115,26 @@ func (s *Server) apiBlacklistSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		OverseaEnabled bool     `json:"oversea_enabled"`
-		CloudEnabled   bool     `json:"cloud_enabled"`
-		BrowserEnabled bool     `json:"browser_enabled"`
-		CNIDCEnabled   bool     `json:"cn_idc_enabled"`
-		ISPKeywords    []string `json:"isp_keywords"`
+		OverseaEnabled *bool     `json:"oversea_enabled"`
+		CloudEnabled   *bool     `json:"cloud_enabled"`
+		BrowserEnabled *bool     `json:"browser_enabled"`
+		CNIDCEnabled   *bool     `json:"cn_idc_enabled"`
+		ISPKeywords    *[]string `json:"isp_keywords"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, 400, map[string]any{"ok": false, "msg": "无效 JSON"})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil ||
+		body.OverseaEnabled == nil || body.CloudEnabled == nil || body.BrowserEnabled == nil || body.CNIDCEnabled == nil || body.ISPKeywords == nil {
+		writeJSON(w, 400, map[string]any{"error": "拦截策略字段不完整"})
 		return
 	}
 	if err := s.bl.Update(blacklist.Snapshot{
-		OverseaEnabled: body.OverseaEnabled,
-		CloudEnabled:   body.CloudEnabled,
-		BrowserEnabled: body.BrowserEnabled,
-		CNIDCEnabled:   body.CNIDCEnabled,
-		ISPKeywords:    body.ISPKeywords,
+		OverseaEnabled: *body.OverseaEnabled,
+		CloudEnabled:   *body.CloudEnabled,
+		BrowserEnabled: *body.BrowserEnabled,
+		CNIDCEnabled:   *body.CNIDCEnabled,
+		ISPKeywords:    *body.ISPKeywords,
 	}); err != nil {
-		writeJSON(w, 500, map[string]any{"ok": false, "msg": err.Error()})
+		s.logger.Error("save blacklist policy", "err", err)
+		writeJSON(w, 500, map[string]any{"error": "保存拦截策略失败，未应用更改"})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})

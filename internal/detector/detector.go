@@ -126,9 +126,10 @@ func (d *Detector) Observe(ip, tokenHash, ua string) {
 
 // Result is a policy decision; the caller handles a hit by rejecting the request.
 type Result struct {
-	Hit  bool
-	Tags []string // 命中的规则名
-	Note string
+	Hit       bool
+	WindowHit bool
+	Tags      []string // 命中的规则名
+	Note      string
 }
 
 // Whitelisted IP 白名单 — 完全跳过所有规则。
@@ -168,7 +169,21 @@ func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
 			notes = append(notes, note)
 		}
 	}
-	return Result{Hit: len(tags) > 0, Tags: tags, Note: strings.Join(notes, "; ")}
+	return Result{Hit: len(tags) > 0, WindowHit: hasWindowHit(notes), Tags: tags, Note: strings.Join(notes, "; ")}
+}
+
+func hasWindowHit(notes []string) bool {
+	for _, note := range notes {
+		key, _, ok := strings.Cut(note, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "token_freq", "ip_freq", "token_distinct_ips", "ip_distinct_tokens":
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Detector) matchRule(r config.Rule, ip, tokenHash string) (bool, string) {

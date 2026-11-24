@@ -103,6 +103,7 @@
           <option value="6h">6 小时</option>
           <option value="24h" selected>24 小时</option>
           <option value="168h">7 天</option>
+          <option value="720h">30 天</option>
         </select>
         <button id="refreshBtn" class="primary" title="快捷键 R">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -131,38 +132,21 @@
       <!-- 请求日志 -->
       <section id="tab-events" class="tab">
         <div class="card">
-          <details class="top-ip-fold" id="evTopIPFold">
-            <summary>
-              <span class="top-ip-title">异常 IP Top 20</span>
-              <span class="muted top-ip-hint">本时间窗内触发次数最高的 IP,展开可一键过滤 / 封禁</span>
-            </summary>
-            <div class="datatable" style="margin-top:8px">
-              <table>
-                <thead><tr>
-                  <th>IP</th>
-                  <th style="text-align:right">触发次数</th>
-                  <th>命中动作</th>
-                  <th>命中规则</th>
-                  <th>最近触发</th>
-                  <th style="width:160px">操作</th>
-                </tr></thead>
-                <tbody id="evTopIPTbody"></tbody>
-              </table>
-            </div>
-          </details>
-          <div class="filter-bar">
-            <input id="evIP" placeholder="按 IP 过滤">
-            <input id="evToken" type="search" aria-label="筛选订阅标识或原始 Token" placeholder="订阅标识或原始 Token">
-            <input id="evUA" placeholder="按 UA 过滤">
-            <select id="evAction">
+          <div class="card-header"><div><h3>查询请求</h3><p class="section-copy">使用顶部的机场与时间范围，配合下方条件查看单条请求。</p></div></div>
+          <form id="evFilterForm" class="event-filter">
+            <div class="event-filter-fields">
+            <label class="control-field">IP 地址<input id="evIP" type="search" placeholder="按 IP 过滤"></label>
+            <label class="control-field">订阅<input id="evToken" type="search" placeholder="订阅标识或原始 Token"></label>
+            <label class="control-field">客户端 UA<input id="evUA" type="search" placeholder="按 UA 关键词过滤"></label>
+            <label class="control-field">动作<select id="evAction">
               <option value="">所有动作</option>
               <option value="pass">放行</option>
               <option value="deny">拒绝（HTTP 403）</option>
               <option value="lumi_failed">Lumi 订阅处理失败</option>
               <option value="display">展示改写</option>
               <option value="display_failed">展示处理失败</option>
-            </select>
-            <select id="evUsage" title="按 IP 用途筛选">
+            </select></label>
+            <label class="control-field">IP 用途<select id="evUsage">
               <option value="">所有用途</option>
               <option value="IDC">数据中心 IDC</option>
               <option value="CDN">内容分发 CDN</option>
@@ -176,11 +160,13 @@
               <option value="ORG">组织机构 ORG</option>
               <option value="NET">基础设施 NET</option>
               <option value="BOGON">保留 IP</option>
-            </select>
-            <label class="bl-toggle" style="margin:0;padding:6px 10px" title="默认隐藏白名单 IP 的请求"><input type="checkbox" id="evShowWL"><span style="font-size:13px">显示白名单</span></label>
-            <button class="primary" id="evQuery">查询</button>
-            <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
-          </div>
+            </select></label>
+            </div>
+            <div class="event-filter-actions">
+              <label class="check-control"><input type="checkbox" id="evShowWL"><span>显示白名单请求</span></label>
+              <div class="actions"><button type="button" class="danger" id="evPurge" title="清空所选机场的请求日志和异常记录">清空日志</button><button type="submit" class="primary" id="evQuery">查询</button></div>
+            </div>
+          </form>
           <div id="evList" class="ev-list" aria-live="polite"></div>
           <button type="button" id="evMoreBtn" class="ev-more-btn" hidden>加载更多</button>
         </div>
@@ -213,41 +199,45 @@
 
       <!-- 黑名单 -->
       <section id="tab-ip-bans" class="tab">
-        <div class="card bl-card">
+        <form id="blForm" class="card">
           <div class="card-header">
-            <h3>全局拦截开关 <span class="muted" style="font-weight:400;margin-left:8px;font-size:12px">命中直接拒绝，不计入频率窗口</span></h3>
-            <div class="actions">
-              <button class="primary" id="blSaveBtn">保存</button>
+            <div><h3>全局拦截策略</h3><p class="section-copy">IP 白名单优先；其余请求命中后直接返回 HTTP 403，不计入触发规则的频率窗口。</p></div>
+            <span class="pill state-soft" id="blStatus" role="status">正在加载…</span>
+          </div>
+          <fieldset id="blFields" class="plain-fieldset" disabled>
+            <div class="policy-grid">
+              <label class="policy-option"><span><strong>限制海外来源</strong><small>非中国大陆来源（含港澳台、未知地区）</small></span><input type="checkbox" id="blOversea" role="switch"></label>
+              <label class="policy-option"><span><strong>限制云厂商 IP</strong><small>命中已识别的云厂商 IP</small></span><input type="checkbox" id="blCloud" role="switch"></label>
+              <label class="policy-option"><span><strong>限制国内数据中心</strong><small>中国大陆且用途为数据中心</small></span><input type="checkbox" id="blCNIDC" role="switch"></label>
+              <label class="policy-option"><span><strong>限制浏览器直访</strong><small>识别 HTML 请求，已知订阅客户端豁免</small></span><input type="checkbox" id="blBrowser" role="switch"></label>
             </div>
-          </div>
-          <div class="bl-row">
-            <label class="bl-toggle"><input type="checkbox" id="blOversea"><span>禁止海外 IP 拉取</span><em>非 CN(港澳台/未知均拦)</em></label>
-            <label class="bl-toggle"><input type="checkbox" id="blCloud"><span>拉黑云厂商 IP</span><em>命中 cloud-ip 库</em></label>
-            <label class="bl-toggle"><input type="checkbox" id="blCNIDC"><span>拉黑国内 IDC</span><em>国内 + 数据中心 IP</em></label>
-            <label class="bl-toggle"><input type="checkbox" id="blBrowser"><span>拉黑浏览器直访</span><em>Accept 头含 text/html，已知订阅客户端 UA 自动豁免</em></label>
-          </div>
-          <div class="bl-row bl-kw">
-            <span class="bl-label">运营商关键字</span>
-            <input id="blISPKw" placeholder="逗号分隔,例:Amazon, DigitalOcean, Hetzner">
-            <span class="muted bl-hint">ISP 字段子串包含即拉黑</span>
-          </div>
-        </div>
+            <div class="policy-footer">
+              <label class="control-field">运营商关键字<input id="blISPKw" placeholder="例如 Amazon，DigitalOcean" aria-describedby="blISPHint"><small id="blISPHint">逗号分隔，运营商名称包含其中任意一项即拦截。</small></label>
+              <div class="table-actions"><button type="button" id="blResetBtn" disabled>还原</button><button type="submit" class="primary" id="blSaveBtn" disabled>保存策略</button></div>
+            </div>
+          </fieldset>
+        </form>
         <div class="card">
           <div class="card-header">
-            <h3>新增 IP 封禁</h3>
+            <div><h3>IP 封禁名单</h3><p class="section-copy" id="banSummary" role="status">正在加载…</p></div>
+            <div class="actions">
+              <input id="banSearch" type="search" aria-label="搜索 IP 或封禁原因" placeholder="搜索 IP 或原因">
+              <select id="banScope" aria-label="封禁类型"><option value="all">全部类型</option><option value="temporary">临时封禁</option><option value="permanent">永久封禁</option></select>
+            </div>
           </div>
-          <div class="filter-bar">
-            <input id="banIPTarget" placeholder="IP 地址,如 1.2.3.4">
-            <input id="banIPReason" placeholder="原因(可选)">
-            <input id="banIPTTL" placeholder="TTL,如 24h,空=永久" style="width:170px">
-            <button class="primary" id="banIPAddBtn">添加</button>
+          <form id="banIPForm" class="ban-form">
+            <label class="control-field">IP 地址<input id="banIPTarget" placeholder="IPv4 或 IPv6" required spellcheck="false"></label>
+            <label class="control-field">原因（可选）<input id="banIPReason" placeholder="例如：异常拉取"></label>
+            <label class="control-field">封禁时长<select id="banIPDuration"><option value="30m">30 分钟</option><option value="2h">2 小时</option><option value="24h" selected>24 小时</option><option value="168h">7 天</option><option value="">永久</option><option value="custom">自定义</option></select></label>
+            <label class="control-field" id="banCustomTTL" hidden>自定义时长<input id="banIPTTL" placeholder="例如 90m 或 48h"></label>
+            <button type="submit" class="primary" id="banIPAddBtn">添加封禁</button>
+          </form>
+          <div class="datatable">
+            <table>
+              <thead><tr><th>IP 地址</th><th>原因</th><th>封禁时间</th><th>到期时间</th><th>来源</th><th>操作</th></tr></thead>
+              <tbody id="ipBanTbody"></tbody>
+            </table>
           </div>
-        </div>
-        <div class="datatable">
-          <table>
-            <thead><tr><th>IP</th><th>原因</th><th>标签</th><th>创建</th><th>过期</th><th>来源</th><th></th></tr></thead>
-            <tbody id="ipBanTbody"></tbody>
-          </table>
         </div>
       </section>
 
@@ -318,11 +308,11 @@
               </div>
               <label class="textarea-label" for="drReps">节点名关键词替换</label>
               <textarea id="drReps" rows="5" placeholder="每行一条：旧词=新词"></textarea>
-              <div class="filter-bar">
-                <label><input type="checkbox" id="drEnabled" checked> 启用</label>
-              </div>
             </div>
-            <div class="modal-footer"><button id="drCancel">取消</button><button class="primary" id="drSave">保存</button></div>
+            <div class="modal-footer modal-form-footer">
+              <label class="check-control"><input type="checkbox" id="drEnabled" checked><span>启用此规则</span></label>
+              <div class="actions"><button id="drCancel">取消</button><button class="primary" id="drSave">保存规则</button></div>
+            </div>
           </div>
         </div>
       </section>
@@ -378,27 +368,25 @@
       <section id="tab-suspects" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3>嫌疑用户</h3>
-            <div class="actions">
-              <input id="suspectSearch" type="search" aria-label="搜索订阅标识、邮箱或 IP" placeholder="订阅标识 / 邮箱 / IP" style="width:200px">
-              <select id="suspectWindow" style="width:auto">
-                <option value="24h">24 小时</option>
-                <option value="168h" selected>7 天</option>
-                <option value="720h">30 天</option>
-              </select>
-              <select id="suspectSort" style="width:auto">
-                <option value="ips" selected>按独立IP</option>
-                <option value="uas">按独立UA</option>
-                <option value="pull">按拉取次数</option>
-                <option value="usage">按使用率(低→高)</option>
-              </select>
-            </div>
+            <div><h3>订阅行为研判</h3><p class="section-copy">按机场和订阅标识汇总成功拉取及风控拒绝，只展示有 V2Board 上报的订阅。</p></div>
           </div>
-          <p class="muted" style="margin:0 0 12px">
-            基于 v2board 上报的流量数据 × 订阅拉取行为交叉分析。按独立 IP / UA / 拉取次数 / 使用率排序,自行研判。支持顶栏机场筛选。
-          </p>
-          <div id="suspectsList" class="ev-list"></div>
+          <div class="review-filters">
+            <label class="control-field">搜索<input id="suspectSearch" type="search" placeholder="订阅标识 / 邮箱 / IP" maxlength="80"></label>
+            <label class="control-field">时间范围<select id="suspectWindow"><option value="24h">24 小时</option><option value="168h" selected>7 天</option><option value="720h">30 天</option></select></label>
+            <label class="control-field">筛选信号<select id="suspectSignal"><option value="all">全部有活动的订阅</option><option value="multiple">多来源信号</option><option value="denied">有拒绝记录</option></select></label>
+            <label class="control-field">排序<select id="suspectSort"><option value="ips" selected>独立 IP 最多</option><option value="uas">UA 标识最多</option><option value="pull">成功拉取最多</option><option value="denied">拒绝次数最多</option><option value="recent">最近活动</option><option value="usage">流量使用率最低</option></select></label>
+          </div>
+          <p class="section-copy">「多来源」指至少 5 个独立 IP 且至少 2 种 UA，仅用于辅助研判，不代表违规或自动封禁。拒绝请求不计入独立 IP / UA。</p>
         </div>
+        <details class="card review-ranking" id="suspectIPRanking">
+          <summary><strong>异常 IP Top 20</strong><span class="section-copy">按同一机场和时间范围内的拒绝次数排名，不要求 V2Board 上报。</span></summary>
+          <div class="datatable">
+            <table><thead><tr><th>IP 地址</th><th class="numeric">拒绝次数</th><th>拦截原因</th><th>最近拒绝</th><th>操作</th></tr></thead>
+              <tbody id="suspectRankingTbody"></tbody></table>
+          </div>
+        </details>
+        <div class="review-results"><p id="suspectResult" class="section-copy" role="status"></p><div id="suspectPager" class="table-actions" hidden><button id="suspectPrev" type="button">上一页</button><button id="suspectNext" type="button">下一页</button></div></div>
+        <div id="suspectsList" class="ev-list"></div>
       </section>
 
       <!-- 设置 -->
@@ -469,11 +457,11 @@
                   <label>前置代理 TCP 来源 IP 或 CIDR<textarea name="ingress_proxies" rows="3" required placeholder="每行一项，例如 127.0.0.1"></textarea></label>
                   <label>真实 IP 请求头的可信代理<textarea name="trust_proxies" rows="3" placeholder="每行一项，例如 127.0.0.1"></textarea></label>
                   <label>真实 IP 请求头（按顺序）<textarea name="trust_headers" rows="3" placeholder="每行一项"></textarea></label>
-                  <label><input type="checkbox" name="cloudflare"> 解析真实 IP 时也信任 Cloudflare 官方 IP 段</label>
+                  <label class="check-control"><input type="checkbox" name="cloudflare"><span>解析真实 IP 时也信任 Cloudflare 官方 IP 段</span></label>
                 </div>
                 <div id="ingressChainFields" class="form-grid" hidden>
                   <label>国内 Nginx 公网出口 IP<textarea name="nginx_egress_ips" rows="3" placeholder="每行一个固定的 IPv4 或 IPv6 出口地址"></textarea></label>
-                  <label><input type="checkbox" name="nginx_client_ip"> 使用国内 Nginx 写入的原始用户 IP</label>
+                  <label class="check-control"><input type="checkbox" name="nginx_client_ip"><span>使用国内 Nginx 写入的原始用户 IP</span></label>
                   <p class="muted">程序定期同步 Cloudflare 官方回源网段，不用手填。仅在 TCP 对端属于 Cloudflare、且 Cloudflare 标记的请求来源为上述 Nginx 时放行。勾选原始用户 IP 前，须在 Nginx 覆盖设置 <code>proxy_set_header X-Sub-Panel-Client-IP $remote_addr;</code>。未提供有效值时，使用 Nginx 出口 IP。</p>
                 </div>
               </fieldset>
@@ -492,7 +480,7 @@
                 <div class="form-grid">
                   <label>管理员账号<input name="admin_username" required></label>
                   <label>登录会话有效期<input name="session_ttl" required placeholder="12h"></label>
-                  <label><input type="checkbox" name="disable_lumi"> 停用 Lumi 订阅兼容处理</label>
+                  <label class="check-control"><input type="checkbox" name="disable_lumi"><span>停用 Lumi 订阅兼容处理</span></label>
                   <label>仅跳过触发规则的 IP（不是全局白名单）<textarea name="detection_only_ips" rows="3" placeholder="每行一个 IP"></textarea></label>
                 </div>
               </fieldset>
@@ -556,7 +544,7 @@
         <input id="tenantFormUpPath" placeholder="留空透传,如 /api/v1/client/subscribe" class="mono">
       </div>
       <div class="form-row">
-        <label><input type="checkbox" id="tenantFormEnabled" checked> 启用</label>
+        <label class="check-control"><input type="checkbox" id="tenantFormEnabled" checked><span>启用此机场</span></label>
         <p class="hint">关掉相当于摘除,网关立即停止接收对应订阅路径请求。</p>
       </div>
     </div>
@@ -631,7 +619,7 @@
       <details class="advanced">
         <summary>高级条件:云 IP / 地理 / ISP</summary>
         <div class="form-row">
-          <label class="inline-check"><input type="checkbox" id="ruleFormFromCloud"> 命中云厂商 IP 库时触发</label>
+          <label class="check-control"><input type="checkbox" id="ruleFormFromCloud"><span>命中云厂商 IP 库时触发</span></label>
         </div>
         <div class="rule-grid rule-grid-2">
           <div class="form-row">

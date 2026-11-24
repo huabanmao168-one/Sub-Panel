@@ -1,9 +1,11 @@
 package webui
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,27 +100,42 @@ func (s *Server) ReportHandler() http.Handler {
 
 // GET /api/suspects?tenant=xxx&window=24h — 嫌疑用户列表(需登录)
 func (s *Server) apiSuspects(w http.ResponseWriter, r *http.Request) {
-	tenant := r.URL.Query().Get("tenant")
-	windowStr := r.URL.Query().Get("window")
-	if windowStr == "" {
-		windowStr = "168h" // 默认 7 天
+	w.Header().Set("Cache-Control", "no-store")
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	if q.Get("view") != "review" {
+		limit = 100
 	}
-	dur, err := time.ParseDuration(windowStr)
-	if err != nil {
-		dur = 168 * time.Hour
-	}
-	since := s.statsSince(dur)
-
-	rows, err := s.st.QuerySuspects(tenant, since)
-	if err != nil {
-		s.logger.Error("query suspects", "err", err)
-		writeJSON(w, 500, map[string]any{"error": "query error"})
+	term := strings.TrimSpace(q.Get("search"))
+	if len(term) > 256 {
+		writeJSON(w, 400, map[string]any{"error": "搜索条件过长"})
 		return
 	}
-	if rows == nil {
-		rows = []store.SuspectRow{}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	page, err := s.st.QuerySuspects(ctx, store.SuspectFilter{
+		Tenant: q.Get("tenant"), Since: s.statsSince(suspectWindow(q.Get("window"))), Search: term,
+		Sort: q.Get("sort"), Signal: q.Get("signal"), Limit: limit, Offset: offset,
+	})
+	if err != nil {
+		s.logger.Error("query suspects", "err", err)
+		writeJSON(w, 500, map[string]any{"error": "查询用户行为失败，请稍后重试"})
+		return
 	}
-	writeJSON(w, 200, rows)
+	if q.Get("view") == "review" {
+		writeJSON(w, 200, page)
+		return
+	}
+	writeJSON(w, 200, page.Items)
+}
+
+func suspectWindow(raw string) time.Duration {
+	dur, err := time.ParseDuration(raw)
+	if err != nil || dur <= 0 {
+		return 168 * time.Hour
+	}
+	return min(dur, 30*24*time.Hour)
 }
 
 // GET /api/user-reports?tenant=xxx — 原始上报列表(需登录)
@@ -162,17 +179,10 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "token required"})
 		return
 	}
-	windowStr := r.URL.Query().Get("window")
-	if windowStr == "" {
-		windowStr = "168h"
-	}
-	dur, err := time.ParseDuration(windowStr)
-	if err != nil {
-		dur = 168 * time.Hour
-	}
-	since := s.statsSince(dur)
-
-	detail, err := s.st.QuerySuspectDetail(s.hasher.Lookup(token), tenant, since)
+	since := s.statsSince(suspectWindow(r.URL.Query().Get("window")))
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	detail, err := s.st.QuerySuspectDetail(ctx, s.hasher.Lookup(token), tenant, since)
 	if err != nil {
 		s.logger.Error("query suspect detail", "err", err)
 		writeJSON(w, 500, map[string]any{"error": "query error"})

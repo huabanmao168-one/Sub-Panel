@@ -119,10 +119,11 @@ CREATE TABLE IF NOT EXISTS detect_rules (
     updated_ts INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS resolved_tokens (
-    token       TEXT PRIMARY KEY,
-    tenant      TEXT,
+    token       TEXT NOT NULL,
+    tenant      TEXT NOT NULL DEFAULT '',
     note        TEXT,
-    resolved_ts INTEGER NOT NULL
+    resolved_ts INTEGER NOT NULL,
+    PRIMARY KEY (token, tenant)
 );
 CREATE INDEX IF NOT EXISTS idx_resolved_tenant_ts ON resolved_tokens(tenant, resolved_ts);
 `
@@ -675,10 +676,8 @@ type IncidentIPAgg struct {
 // AggIncidentsByIP 按 IP 聚合,返回触发次数最高的 N 个 IP。
 // 复用 IncidentFilter 的 Since/Tenant/Severity/Action/Tag/Keyword 字段。
 func (s *Store) AggIncidentsByIP(ctx context.Context, f IncidentFilter) ([]IncidentIPAgg, error) {
-	q := `SELECT client_ip, COUNT(*) c, MAX(ts) last_ts,
-	             GROUP_CONCAT(DISTINCT action) acts,
-	             GROUP_CONCAT(rule_tags, '|') tags
-	      FROM incidents WHERE 1=1`
+	q := `WITH filtered AS (
+		SELECT client_ip,ts,action,rule_tags FROM incidents WHERE client_ip<>''`
 	args := []any{}
 	if f.Tenant != "" {
 		q += " AND tenant=?"
@@ -704,11 +703,20 @@ func (s *Store) AggIncidentsByIP(ctx context.Context, f IncidentFilter) ([]Incid
 		q += " AND ts>=?"
 		args = append(args, f.Since.UnixMilli())
 	}
-	q += " AND client_ip != '' GROUP BY client_ip ORDER BY c DESC"
 	if f.Limit <= 0 || f.Limit > 200 {
 		f.Limit = 20
 	}
-	q += " LIMIT ?"
+	q += `), ranked AS (
+		SELECT client_ip,COUNT(*) AS c,MAX(ts) AS last_ts,GROUP_CONCAT(DISTINCT action) AS acts
+		FROM filtered GROUP BY client_ip ORDER BY c DESC,last_ts DESC,client_ip LIMIT ?
+	)
+	SELECT client_ip,c,last_ts,acts,(
+		SELECT json_group_array(tag) FROM (
+			SELECT DISTINCT j.value AS tag
+			FROM filtered f JOIN json_each(CASE WHEN json_valid(f.rule_tags) THEN f.rule_tags ELSE '[]' END) j
+			WHERE f.client_ip=ranked.client_ip AND j.type='text' ORDER BY tag
+		)
+	) AS tags FROM ranked ORDER BY c DESC,last_ts DESC,client_ip`
 	args = append(args, f.Limit)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -730,17 +738,8 @@ func (s *Store) AggIncidentsByIP(ctx context.Context, f IncidentFilter) ([]Incid
 			}
 		}
 		if tagsStr.Valid {
-			tagSet := map[string]bool{}
-			for _, chunk := range strings.Split(tagsStr.String, "|") {
-				var arr []string
-				if json.Unmarshal([]byte(chunk), &arr) == nil {
-					for _, t := range arr {
-						tagSet[t] = true
-					}
-				}
-			}
-			for t := range tagSet {
-				a.Tags = append(a.Tags, t)
+			if err := json.Unmarshal([]byte(tagsStr.String), &a.Tags); err != nil {
+				return nil, err
 			}
 		}
 		out = append(out, a)
@@ -901,14 +900,14 @@ func (s *Store) AddResolvedToken(ctx context.Context, token, tenant, note string
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO resolved_tokens (token, tenant, note, resolved_ts) VALUES (?,?,?,?)
-		 ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant, note=excluded.note, resolved_ts=excluded.resolved_ts`,
+		 ON CONFLICT(token, tenant) DO UPDATE SET note=excluded.note, resolved_ts=excluded.resolved_ts`,
 		token, tenant, note, time.Now().UnixMilli())
 	return err
 }
 
 // RemoveResolvedToken 取消已处理标记。
-func (s *Store) RemoveResolvedToken(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM resolved_tokens WHERE token=?", token)
+func (s *Store) RemoveResolvedToken(ctx context.Context, token, tenant string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM resolved_tokens WHERE token=? AND tenant=?", token, tenant)
 	return err
 }
 
@@ -986,6 +985,21 @@ func (s *Store) SetMeta(key, value string) error {
 		`INSERT INTO meta (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
 		key, value)
 	return err
+}
+
+// SetMetaBatch updates related settings in a single SQLite transaction.
+func (s *Store) SetMetaBatch(values map[string]string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range values {
+		if _, err := tx.Exec(`INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, key, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // GetMeta 不存在返回 ("", nil)
@@ -1390,140 +1404,6 @@ func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 	return out, rows.Err()
 }
 
-// SuspectRow 是嫌疑分析结果:user_report + events 聚合
-type SuspectRow struct {
-	UserReport
-	PullCount   int `json:"pull_count"`
-	DistinctIPs int `json:"distinct_ips"`
-	DistinctUAs int `json:"distinct_uas"`
-}
-
-func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, error) {
-	// 先拿 user_reports
-	reports, err := s.ListUserReports(tenant)
-	if err != nil {
-		return nil, err
-	}
-	if len(reports) == 0 {
-		return nil, nil
-	}
-
-	// 排除已处理 token
-	resolvedSet := make(map[string]bool)
-	resolvedRows, _ := s.db.Query(`SELECT token FROM resolved_tokens`)
-	if resolvedRows != nil {
-		defer resolvedRows.Close()
-		for resolvedRows.Next() {
-			var t string
-			if resolvedRows.Scan(&t) == nil {
-				resolvedSet[t] = true
-			}
-		}
-	}
-	filtered := reports[:0]
-	for _, r := range reports {
-		if !resolvedSet[r.Token] {
-			filtered = append(filtered, r)
-		}
-	}
-	reports = filtered
-	if len(reports) == 0 {
-		return nil, nil
-	}
-
-	sinceMs := since.UnixMilli()
-
-	// 一次性从 events 表批量聚合所有 token 的统计
-	tenantCond := ""
-	args := []any{sinceMs}
-	if tenant != "" {
-		tenantCond = " AND tenant=?"
-		args = append(args, tenant)
-	}
-	rows, err := s.db.Query(`
-		SELECT tenant, token_hash, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
-		FROM events WHERE ts>=?`+tenantCond+`
-		GROUP BY tenant, token_hash`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	type evStats struct {
-		pullCount   int
-		distinctIPs int
-		distinctUAs int
-	}
-	type reportKey struct{ tenant, token string }
-	statsMap := make(map[reportKey]evStats, len(reports))
-	for rows.Next() {
-		var key reportKey
-		var st evStats
-		if err := rows.Scan(&key.tenant, &key.token, &st.pullCount, &st.distinctIPs, &st.distinctUAs); err != nil {
-			return nil, err
-		}
-		statsMap[key] = st
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	out := make([]SuspectRow, 0, len(reports))
-	for _, r := range reports {
-		st, ok := statsMap[reportKey{r.Tenant, r.Token}]
-		if !ok {
-			continue
-		}
-		pullCount := st.pullCount
-		distinctIPs := st.distinctIPs
-		distinctUAs := st.distinctUAs
-
-		out = append(out, SuspectRow{
-			UserReport:  r,
-			PullCount:   pullCount,
-			DistinctIPs: distinctIPs,
-			DistinctUAs: distinctUAs,
-		})
-	}
-
-	// 按邮箱合并:同邮箱只保留最近的 token(last_seen 最大的)
-	emailMap := make(map[string]int, len(out)) // email -> index in merged
-	merged := make([]SuspectRow, 0, len(out))
-	for _, row := range out {
-		key := row.Email + "\x00" + row.Tenant
-		if row.Email == "" {
-			// 无邮箱不合并
-			merged = append(merged, row)
-			continue
-		}
-		if idx, exists := emailMap[key]; exists {
-			// 保留 last_seen 更大的
-			if row.LastSeen > merged[idx].LastSeen {
-				merged[idx] = row
-			}
-		} else {
-			emailMap[key] = len(merged)
-			merged = append(merged, row)
-		}
-	}
-	out = merged
-
-	// 按独立 IP 降序,同分按 pull_count 降序(共享/倒卖最直观信号)
-	for i := range out {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].DistinctIPs > out[i].DistinctIPs ||
-				(out[j].DistinctIPs == out[i].DistinctIPs && out[j].PullCount > out[i].PullCount) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	// 最多返回 top 100
-	if len(out) > 100 {
-		out = out[:100]
-	}
-	return out, nil
-}
-
 // SuspectDetail 单用户的 IP 列表和 UA 列表
 type SuspectDetail struct {
 	IPs      []IPDetail      `json:"ips"`
@@ -1553,21 +1433,16 @@ type BindingDetail struct {
 	Count int    `json:"count"`
 }
 
-func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*SuspectDetail, error) {
-	sinceMs := since.UnixMilli()
-	detail := &SuspectDetail{}
-
-	// IP 明细
-	tenantCond := ""
-	args := []any{token, sinceMs}
+func (s *Store) QuerySuspectDetail(ctx context.Context, token, tenant string, since time.Time) (*SuspectDetail, error) {
+	detail := &SuspectDetail{IPs: []IPDetail{}, UAs: []UADetail{}, Bindings: []BindingDetail{}}
+	where := ` FROM events e WHERE e.token_hash=? AND e.ts>=? AND (` + deliveredSubscription + `)`
+	args := []any{token, since.UnixMilli()}
 	if tenant != "" {
-		tenantCond = " AND tenant=?"
+		where += " AND e.tenant=?"
 		args = append(args, tenant)
 	}
-	ipRows, err := s.db.Query(`
-		SELECT client_ip, COALESCE(country,''), COALESCE(isp,''), COUNT(*), MAX(ts)
-		FROM events WHERE token_hash=? AND ts>=?`+tenantCond+`
-		GROUP BY client_ip ORDER BY COUNT(*) DESC`, args...)
+	ipRows, err := s.db.QueryContext(ctx, `SELECT TRIM(client_ip), COALESCE(MAX(country),''), COALESCE(MAX(isp),''), COUNT(*), MAX(ts)`+where+`
+		AND TRIM(client_ip)<>'' GROUP BY TRIM(client_ip) ORDER BY COUNT(*) DESC, MAX(ts) DESC, TRIM(client_ip)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1575,22 +1450,15 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 	for ipRows.Next() {
 		var d IPDetail
 		if err := ipRows.Scan(&d.IP, &d.Country, &d.ISP, &d.HitCount, &d.LastSeen); err != nil {
-			continue
+			return nil, err
 		}
 		detail.IPs = append(detail.IPs, d)
 	}
-
-	// UA 明细
-	args2 := []any{token, sinceMs}
-	tenantCond2 := ""
-	if tenant != "" {
-		tenantCond2 = " AND tenant=?"
-		args2 = append(args2, tenant)
+	if err := ipRows.Err(); err != nil {
+		return nil, err
 	}
-	uaRows, err := s.db.Query(`
-		SELECT COALESCE(ua,''), COUNT(*), MAX(ts)
-		FROM events WHERE token_hash=? AND ts>=?`+tenantCond2+`
-		GROUP BY ua ORDER BY COUNT(*) DESC`, args2...)
+	uaRows, err := s.db.QueryContext(ctx, `SELECT TRIM(ua), COUNT(*), MAX(ts)`+where+`
+		AND TRIM(ua)<>'' GROUP BY TRIM(ua) ORDER BY COUNT(*) DESC, MAX(ts) DESC, TRIM(ua)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1598,22 +1466,15 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 	for uaRows.Next() {
 		var d UADetail
 		if err := uaRows.Scan(&d.UA, &d.HitCount, &d.LastSeen); err != nil {
-			continue
+			return nil, err
 		}
 		detail.UAs = append(detail.UAs, d)
 	}
-
-	// IP-UA 绑定关系
-	args3 := []any{token, sinceMs}
-	tenantCond3 := ""
-	if tenant != "" {
-		tenantCond3 = " AND tenant=?"
-		args3 = append(args3, tenant)
+	if err := uaRows.Err(); err != nil {
+		return nil, err
 	}
-	bindRows, err := s.db.Query(`
-		SELECT client_ip, COALESCE(ua,''), COUNT(*)
-		FROM events WHERE token_hash=? AND ts>=?`+tenantCond3+`
-		GROUP BY client_ip, ua ORDER BY COUNT(*) DESC`, args3...)
+	bindRows, err := s.db.QueryContext(ctx, `SELECT TRIM(client_ip), TRIM(ua), COUNT(*)`+where+`
+		AND TRIM(client_ip)<>'' AND TRIM(ua)<>'' GROUP BY TRIM(client_ip), TRIM(ua) ORDER BY COUNT(*) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1621,10 +1482,9 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 	for bindRows.Next() {
 		var b BindingDetail
 		if err := bindRows.Scan(&b.IP, &b.UA, &b.Count); err != nil {
-			continue
+			return nil, err
 		}
 		detail.Bindings = append(detail.Bindings, b)
 	}
-
-	return detail, nil
+	return detail, bindRows.Err()
 }

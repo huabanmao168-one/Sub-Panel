@@ -46,6 +46,22 @@ func initSchema(db *sql.DB) error {
 	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
+	var tenantPK int
+	if err := tx.QueryRow(`SELECT pk FROM pragma_table_info('resolved_tokens') WHERE name='tenant'`).Scan(&tenantPK); err != nil {
+		return err
+	}
+	if tenantPK == 0 {
+		// Older databases keyed handled records by token alone, so one tenant
+		// could overwrite another. Preserve NULL/empty as an all-tenant marker.
+		if _, err := tx.Exec(`
+			ALTER TABLE resolved_tokens RENAME TO resolved_tokens_legacy;
+			CREATE TABLE resolved_tokens (token TEXT NOT NULL, tenant TEXT NOT NULL DEFAULT '', note TEXT, resolved_ts INTEGER NOT NULL, PRIMARY KEY(token, tenant));
+			INSERT INTO resolved_tokens SELECT token, COALESCE(tenant,''), note, resolved_ts FROM resolved_tokens_legacy WHERE token IS NOT NULL;
+			DROP TABLE resolved_tokens_legacy;
+			CREATE INDEX idx_resolved_tenant_ts ON resolved_tokens(tenant, resolved_ts);`); err != nil {
+			return err
+		}
+	}
 	// Keep this decision across a failed import: an intentionally empty old table
 	// must not be repopulated, and a failed new import must be retryable.
 	seed := "yes"

@@ -5,6 +5,7 @@ package banlist
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -45,22 +46,25 @@ func (l *List) LoadFromStore(ctx context.Context) error {
 		if b.ExpiresTS != nil {
 			e.expires = *b.ExpiresTS
 		}
-		l.ips[b.Target] = e
+		l.ips[canonicalIP(b.Target)] = e
 	}
 	return nil
 }
 
 // CheckIP 检查 IP 是否封禁,返回 (banned, reason)。过期会被惰性清理。
 func (l *List) CheckIP(ip string) (bool, string) {
+	ip = canonicalIP(ip)
 	l.mu.RLock()
 	e, ok := l.ips[ip]
 	l.mu.RUnlock()
 	if !ok {
 		return false, ""
 	}
-	if !e.expires.IsZero() && time.Now().After(e.expires) {
+	if !e.expires.IsZero() && !time.Now().Before(e.expires) {
 		l.mu.Lock()
-		delete(l.ips, ip)
+		if current, exists := l.ips[ip]; exists && !current.expires.IsZero() && !time.Now().Before(current.expires) {
+			delete(l.ips, ip)
+		}
 		l.mu.Unlock()
 		return false, ""
 	}
@@ -76,10 +80,10 @@ func (l *List) AddIP(ip, reason string, ttl time.Duration, ruleTags []string, cr
 		e.expires = now.Add(ttl)
 		expPtr = &e.expires
 	}
+	ip = canonicalIP(ip)
 	l.mu.Lock()
-	l.ips[ip] = e
-	l.mu.Unlock()
-	return l.st.AddBan(store.Ban{
+	defer l.mu.Unlock()
+	if err := l.st.AddBan(store.Ban{
 		Kind:      "ip",
 		Target:    ip,
 		Reason:    reason,
@@ -87,14 +91,29 @@ func (l *List) AddIP(ip, reason string, ttl time.Duration, ruleTags []string, cr
 		CreatedTS: now,
 		ExpiresTS: expPtr,
 		CreatedBy: createdBy,
-	})
+	}); err != nil {
+		return err
+	}
+	l.ips[ip] = e
+	return nil
 }
 
 func (l *List) RemoveIP(ip string) error {
 	l.mu.Lock()
-	delete(l.ips, ip)
-	l.mu.Unlock()
-	return l.st.RemoveBan("ip", ip)
+	defer l.mu.Unlock()
+	// The dashboard supplies the original stored key, including legacy IPv6 spellings.
+	if err := l.st.RemoveBan("ip", ip); err != nil {
+		return err
+	}
+	delete(l.ips, canonicalIP(ip))
+	return nil
+}
+
+func canonicalIP(ip string) string {
+	if addr, err := netip.ParseAddr(ip); err == nil {
+		return addr.WithZone("").Unmap().String()
+	}
+	return ip
 }
 
 // Snapshot 给 webui 用,只返 IP。

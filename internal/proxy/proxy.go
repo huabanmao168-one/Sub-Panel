@@ -288,6 +288,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res := g.det.Evaluate(pr.ClientIP, tokenHash, pr.UA)
 
 	if res.Hit {
+		if res.WindowHit {
+			res.Tags = append(res.Tags, "detector_window")
+		}
 		g.denySubscription(w, pr, tokenHash, res.Tags, res.Note, start)
 		return
 	}

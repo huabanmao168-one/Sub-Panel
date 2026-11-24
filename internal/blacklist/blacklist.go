@@ -13,7 +13,9 @@
 package blacklist
 
 import (
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/huabanmao168/SubPanel/internal/store"
@@ -29,6 +31,7 @@ type Snapshot struct {
 
 type Manager struct {
 	st   *store.Store
+	mu   sync.Mutex
 	snap atomic.Pointer[Snapshot]
 }
 
@@ -48,20 +51,33 @@ func New(st *store.Store) *Manager {
 
 // Reload 从 meta 读最新配置,原子替换内存快照。
 func (m *Manager) Reload() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	sn := &Snapshot{}
-	sn.OverseaEnabled = readBool(m.st, MetaOversea)
-	sn.CloudEnabled = readBool(m.st, MetaCloud)
-	sn.BrowserEnabled = readBool(m.st, MetaBrowser)
-	sn.CNIDCEnabled = readBool(m.st, MetaCNIDC)
-	if v, _ := m.st.GetMeta(MetaISPKwCSV); v != "" {
-		for _, p := range strings.Split(v, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				sn.ISPKeywords = append(sn.ISPKeywords, p)
-			}
+	for key, value := range map[string]*bool{MetaOversea: &sn.OverseaEnabled, MetaCloud: &sn.CloudEnabled, MetaBrowser: &sn.BrowserEnabled, MetaCNIDC: &sn.CNIDCEnabled} {
+		v, err := m.st.GetMeta(key)
+		if err != nil {
+			return err
 		}
+		*value = v == "true" || v == "1" || v == "on"
 	}
+	v, err := m.st.GetMeta(MetaISPKwCSV)
+	if err != nil {
+		return err
+	}
+	sn.ISPKeywords = normalizeKeywords(v)
 	m.snap.Store(sn)
 	return nil
+}
+
+func normalizeKeywords(raw string) []string {
+	out := []string{}
+	for _, field := range strings.Split(raw, ",") {
+		if field = strings.TrimSpace(field); field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 // Get 返回当前快照(只读,不要修改字段)。
@@ -73,25 +89,20 @@ func (m *Manager) Get() *Snapshot {
 	return s
 }
 
-// Update 写 meta + reload。
+// Update publishes the new policy only after all fields were persisted.
 func (m *Manager) Update(s Snapshot) error {
-	if err := writeBool(m.st, MetaOversea, s.OverseaEnabled); err != nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s.ISPKeywords = normalizeKeywords(strings.Join(s.ISPKeywords, ","))
+	if err := m.st.SetMetaBatch(map[string]string{
+		MetaOversea: strconv.FormatBool(s.OverseaEnabled), MetaCloud: strconv.FormatBool(s.CloudEnabled),
+		MetaBrowser: strconv.FormatBool(s.BrowserEnabled), MetaCNIDC: strconv.FormatBool(s.CNIDCEnabled),
+		MetaISPKwCSV: strings.Join(s.ISPKeywords, ","),
+	}); err != nil {
 		return err
 	}
-	if err := writeBool(m.st, MetaCloud, s.CloudEnabled); err != nil {
-		return err
-	}
-	if err := writeBool(m.st, MetaBrowser, s.BrowserEnabled); err != nil {
-		return err
-	}
-	if err := writeBool(m.st, MetaCNIDC, s.CNIDCEnabled); err != nil {
-		return err
-	}
-	kw := strings.Join(s.ISPKeywords, ",")
-	if err := m.st.SetMeta(MetaISPKwCSV, kw); err != nil {
-		return err
-	}
-	return m.Reload()
+	m.snap.Store(&s)
+	return nil
 }
 
 // IsOverseaCountry 判断是否非中国大陆。iso 优先 ISO 码,空 = 未知。
@@ -212,17 +223,4 @@ func (m *Manager) Evaluate(iso, country, usageType, isp string, isCloud bool, ac
 		return true, "bl_browser"
 	}
 	return false, ""
-}
-
-func readBool(st *store.Store, key string) bool {
-	v, _ := st.GetMeta(key)
-	return v == "true" || v == "1" || v == "on"
-}
-
-func writeBool(st *store.Store, key string, v bool) error {
-	s := "false"
-	if v {
-		s = "true"
-	}
-	return st.SetMeta(key, s)
 }
