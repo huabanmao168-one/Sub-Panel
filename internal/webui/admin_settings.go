@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"golang.org/x/crypto/bcrypt"
@@ -107,6 +108,9 @@ func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "enabled": *body.Enabled})
 }
 
+// SetRuntimeRestart installs the supervisor restart callback before serving HTTP.
+func (s *Server) SetRuntimeRestart(restart func()) { s.runtimeRestart = restart }
+
 func (s *Server) apiRuntimeSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodGet && r.Method != http.MethodPut {
@@ -122,6 +126,10 @@ func (s *Server) apiRuntimeSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPut {
+		if s.runtimeRestartQueued {
+			writeJSON(w, 409, map[string]any{"error": "配置已保存，服务正在重启"})
+			return
+		}
 		contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if contentType != "application/json" {
 			writeJSON(w, 415, map[string]any{"error": "需要 application/json"})
@@ -145,5 +153,15 @@ func (s *Server) apiRuntimeSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	active, saved := s.cfg.RuntimeSettings(), cfg.RuntimeSettings()
-	writeJSON(w, 200, map[string]any{"active": active, "saved": saved, "restart_required": !reflect.DeepEqual(active, saved)})
+	pending := !reflect.DeepEqual(active, saved)
+	restart := pending && r.Method == http.MethodPut && r.URL.Query().Get("restart") == "1" && s.runtimeRestart != nil
+	if restart {
+		s.runtimeRestartQueued = true
+	}
+	writeJSON(w, 200, map[string]any{"active": active, "saved": saved, "restart_required": pending,
+		"restart_supported": s.runtimeRestart != nil, "restart_scheduled": s.runtimeRestartQueued})
+	if restart {
+		_ = http.NewResponseController(w).Flush()
+		time.AfterFunc(500*time.Millisecond, s.runtimeRestart)
+	}
 }

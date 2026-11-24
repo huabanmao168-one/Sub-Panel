@@ -263,6 +263,15 @@ func main() {
 
 	// admin server (先创建 ui,subMux 也要用它的 ReportHandler)
 	ui := webui.NewServer(savedCfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
+	restartCh := make(chan struct{}, 1)
+	if os.Getenv("SUB_PANEL_SYSTEMD_RESTART") == "1" {
+		ui.SetRuntimeRestart(func() {
+			select {
+			case restartCh <- struct{}{}:
+			default:
+			}
+		})
+	}
 	verifiedSince, err := st.VerifiedIngressSince(time.Now())
 	if err != nil {
 		logger.Error("初始化可信入口统计失败", "err", err)
@@ -320,16 +329,28 @@ func main() {
 	// 等待信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
-	logger.Info("收到退出信号", "signal", sig.String())
+	restart := false
+	select {
+	case sig := <-sigCh:
+		logger.Info("收到退出信号", "signal", sig.String())
+	case <-restartCh:
+		restart = true
+		logger.Info("已保存系统设置，正在退出以便 systemd 重新启动")
+	}
+	signal.Stop(sigCh)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = subSrv.Shutdown(ctx)
 	_ = adminSrv.Shutdown(ctx)
+	_ = subSrv.Shutdown(ctx)
 	cancelFetch()
 	close(stopCh)
-	time.Sleep(200 * time.Millisecond) // 让异步 writer flush
+	if restart {
+		if err := st.Close(); err != nil {
+			logger.Warn("关闭数据库失败", "err", err)
+		}
+		os.Exit(75) // The installed systemd service restarts on this status.
+	}
 	logger.Info("已退出")
 }
 

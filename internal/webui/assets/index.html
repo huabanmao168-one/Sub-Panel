@@ -119,11 +119,11 @@
         <div class="stat-cards" id="summaryCards"></div>
         <div class="row-2col">
           <div class="card">
-            <h3>访问量最高的 IP</h3>
+            <div class="card-header"><div><h3>访问量最高的 IP</h3><p class="section-copy">按当前范围内的请求量排序。</p></div></div>
             <div class="datatable"><table id="topIPs"><thead><tr><th>IP</th><th>地区</th><th>运营商</th><th class="numeric">请求数</th></tr></thead><tbody></tbody></table></div>
           </div>
           <div class="card">
-            <h3>访问量最高的订阅</h3>
+            <div class="card-header"><div><h3>访问量最高的订阅</h3><p class="section-copy">显示订阅标识，不显示原始凭据。</p></div></div>
             <div class="datatable"><table id="topTokens"><thead><tr><th>订阅标识</th><th class="numeric">请求数</th></tr></thead><tbody></tbody></table></div>
           </div>
         </div>
@@ -176,12 +176,11 @@
       <section id="tab-resolved" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3 class="card-title">已处理 Token</h3>
+            <div><h3>已处理订阅</h3><p class="section-copy">恢复后，该订阅会重新出现在请求日志列表。</p></div>
             <div class="actions">
               <button class="danger" id="resolvedClearAll">清空全部</button>
             </div>
           </div>
-          <p class="muted" style="margin:0 0 12px">这些 token 不再出现在请求日志列表里。可点击恢复让它重新可见。</p>
           <div class="datatable">
             <table>
               <thead><tr>
@@ -219,19 +218,20 @@
         </form>
         <div class="card">
           <div class="card-header">
-            <div><h3>IP 封禁名单</h3><p class="section-copy" id="banSummary" role="status">正在加载…</p></div>
+            <div><h3>IP 封禁名单</h3><p class="section-copy">管理临时和永久的单 IP 封禁。</p></div>
             <div class="actions">
               <input id="banSearch" type="search" aria-label="搜索 IP 或封禁原因" placeholder="搜索 IP 或原因">
               <select id="banScope" aria-label="封禁类型"><option value="all">全部类型</option><option value="temporary">临时封禁</option><option value="permanent">永久封禁</option></select>
             </div>
           </div>
-          <form id="banIPForm" class="ban-form">
+          <form id="banIPForm" class="list-entry-form">
             <label class="control-field">IP 地址<input id="banIPTarget" placeholder="IPv4 或 IPv6" required spellcheck="false"></label>
             <label class="control-field">原因（可选）<input id="banIPReason" placeholder="例如：异常拉取"></label>
             <label class="control-field">封禁时长<select id="banIPDuration"><option value="30m">30 分钟</option><option value="2h">2 小时</option><option value="24h" selected>24 小时</option><option value="168h">7 天</option><option value="">永久</option><option value="custom">自定义</option></select></label>
             <label class="control-field" id="banCustomTTL" hidden>自定义时长<input id="banIPTTL" placeholder="例如 90m 或 48h"></label>
             <button type="submit" class="primary" id="banIPAddBtn">添加封禁</button>
           </form>
+          <p id="banSummary" class="list-summary" role="status">正在加载…</p>
           <div class="datatable">
             <table>
               <thead><tr><th>IP 地址</th><th>原因</th><th>封禁时间</th><th>到期时间</th><th>来源</th><th>操作</th></tr></thead>
@@ -244,38 +244,40 @@
       <!-- IP 白名单 -->
       <section id="tab-ip-whitelist" class="tab">
         <div class="card">
-          <h3>新增 IP 白名单</h3>
-          <div class="filter-bar">
-            <input id="ipWLTarget" placeholder="IP 或 CIDR,如 1.2.3.4 或 10.0.0.0/8">
-            <input id="ipWLNote" placeholder="备注">
-            <button class="primary" id="ipWLAddBtn">添加</button>
+          <div class="card-header">
+            <div><h3>IP 白名单</h3><p class="section-copy">通过入口校验后，白名单优先于黑名单和触发规则。</p></div>
+            <div class="actions"><input id="ipWLSearch" type="search" aria-label="搜索 IP 白名单" placeholder="搜索 IP、网段或备注"></div>
           </div>
-          <p class="muted">白名单 IP 跳过所有规则检测,直接放行。<strong style="color:var(--text)">优先级最高,凌驾于黑名单。</strong></p>
-        </div>
-        <div class="datatable">
-          <table>
-            <thead><tr><th>IP / CIDR</th><th>备注</th><th>创建</th><th></th></tr></thead>
+          <form id="ipWLForm" class="list-entry-form">
+            <label class="control-field">IP 地址或网段<input id="ipWLTarget" required placeholder="例如 192.0.2.3 或 192.0.2.0/24"></label>
+            <label class="control-field">备注（可选）<input id="ipWLNote" placeholder="例如：办公出口"></label>
+            <button type="submit" class="primary" id="ipWLAddBtn">添加白名单</button>
+          </form>
+          <p id="ipWLSummary" class="list-summary" role="status">正在加载…</p>
+          <div class="datatable"><table>
+            <thead><tr><th>IP / CIDR</th><th>备注</th><th>添加时间</th><th>操作</th></tr></thead>
             <tbody id="ipWLTbody"></tbody>
-          </table>
+          </table></div>
         </div>
       </section>
 
       <!-- UA 黑名单 -->
       <section id="tab-ua-blacklist" class="tab">
         <div class="card">
-          <h3>新增 UA 黑名单</h3>
-          <div class="filter-bar">
-            <input id="uaBlPattern" placeholder="UA 关键词,如 curl">
-            <input id="uaBlNote" placeholder="备注">
-            <button class="primary" id="uaBlAddBtn">添加</button>
+          <div class="card-header">
+            <div><h3>UA 黑名单</h3><p class="section-copy">UA 包含任一关键词时返回 HTTP 403，匹配忽略大小写。</p></div>
+            <div class="actions"><input id="uaBlSearch" type="search" aria-label="搜索 UA 黑名单" placeholder="搜索 UA 关键词或备注"></div>
           </div>
-          <p class="muted">命中黑名单的 UA 直接返回 HTTP 403，不进入触发规则。子串匹配（忽略大小写）。</p>
-        </div>
-        <div class="datatable">
-          <table>
-            <thead><tr><th>UA 关键词</th><th>备注</th><th>创建</th><th></th></tr></thead>
+          <form id="uaBlForm" class="list-entry-form">
+            <label class="control-field">UA 关键词<input id="uaBlPattern" required placeholder="例如 curl"></label>
+            <label class="control-field">备注（可选）<input id="uaBlNote" placeholder="例如：限制自动化拉取"></label>
+            <button type="submit" class="primary" id="uaBlAddBtn">添加黑名单</button>
+          </form>
+          <p id="uaBlSummary" class="list-summary" role="status">正在加载…</p>
+          <div class="datatable"><table>
+            <thead><tr><th>UA 关键词</th><th>备注</th><th>添加时间</th><th>操作</th></tr></thead>
             <tbody id="uaBlTbody"></tbody>
-          </table>
+          </table></div>
         </div>
       </section>
 
@@ -283,37 +285,45 @@
       <section id="tab-display-rules" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3>订阅展示规则</h3>
-            <div class="actions"><button class="primary" id="drAddBtn">新增规则</button></div>
+            <div><h3>订阅展示规则</h3><p class="section-copy">按邮箱或客户端 UA 匹配。只改展示名称，不修改连接参数；第一条命中生效。</p></div>
+            <div class="actions"><button type="button" class="primary" id="drAddBtn">新增规则</button></div>
           </div>
-          <p class="muted">按邮箱条件或全部订阅匹配；只改显示名称，不修改连接参数。</p>
           <div class="datatable">
             <table>
-              <thead><tr><th>规则名</th><th>机场</th><th>匹配条件</th><th>新机场名</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th>优先级</th><th>规则名</th><th>机场</th><th>匹配条件</th><th>新机场名</th><th>状态</th><th>操作</th></tr></thead>
               <tbody id="drTbody"></tbody>
             </table>
           </div>
         </div>
         <div class="modal-overlay" id="drModal" hidden>
-          <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="drModalTitle" tabindex="-1">
-            <div class="modal-header"><h3 id="drModalTitle">新增规则</h3><button class="close-btn" id="drClose" aria-label="关闭弹窗">×</button></div>
+          <form id="drForm" class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="drModalTitle" tabindex="-1">
+            <div class="modal-header"><h3 id="drModalTitle">新增规则</h3><button type="button" class="close-btn" id="drClose" aria-label="关闭弹窗">×</button></div>
             <div class="modal-body">
-              <div class="form-grid runtime-group-grid">
-                <label>规则名<input id="drName" placeholder="例如：品牌名称更新"></label>
-                <label>机场<select id="drTenant"></select></label>
-                <label>匹配方式<select id="drMatchType"><option value="email_suffix">邮箱后缀</option><option value="email_exact">完整邮箱</option><option value="email_keyword">邮箱关键词</option><option value="all">该机场全部订阅</option></select></label>
-                <label id="drMatchRow">匹配值<input id="drMatchValue" placeholder="例如：example.com"></label>
-                <label>原机场名<input id="drAirportFrom" placeholder="留空按默认方式处理"></label>
-                <label>新机场名<input id="drAirportTo" placeholder="留空则不替换"></label>
-              </div>
-              <label class="textarea-label" for="drReps">节点名关键词替换</label>
-              <textarea id="drReps" rows="5" placeholder="每行一条：旧词=新词"></textarea>
+              <fieldset class="settings-group">
+                <legend>适用范围</legend>
+                <div class="settings-fields">
+                  <label class="control-field">规则名<input id="drName" required placeholder="例如：品牌名称更新"></label>
+                  <label class="control-field">机场<select id="drTenant" required></select></label>
+                  <label class="control-field">匹配方式<select id="drMatchType"><optgroup label="邮箱 / 上报"><option value="email_suffix">邮箱后缀</option><option value="email_exact">完整邮箱</option><option value="email_keyword">邮箱关键词</option><option value="all">全部已上报邮箱的订阅</option></optgroup><optgroup label="客户端 UA"><option value="ua_contains">UA 包含</option><option value="ua_not_contains">UA 不包含</option></optgroup></select></label>
+                  <label class="control-field" id="drMatchRow"><span id="drMatchLabel">匹配值</span><input id="drMatchValue" placeholder="例如：example.com" required></label>
+                  <label class="control-field">优先级<input id="drSortOrder" type="number" step="1" required><small>数字越小越先检查，同优先级按创建顺序。</small></label>
+                </div>
+                <p class="section-copy" id="drMatchHint"></p>
+              </fieldset>
+              <fieldset class="settings-group">
+                <legend>替换内容</legend>
+                <div class="settings-fields">
+                  <label class="control-field">原机场名<input id="drAirportFrom" placeholder="留空按默认方式处理"></label>
+                  <label class="control-field">新机场名<input id="drAirportTo" placeholder="留空则不替换"></label>
+                </div>
+                <label class="control-field">节点名关键词替换<textarea id="drReps" rows="4" placeholder="每行一条：旧词=新词"></textarea></label>
+              </fieldset>
             </div>
             <div class="modal-footer modal-form-footer">
               <label class="check-control"><input type="checkbox" id="drEnabled" checked><span>启用此规则</span></label>
-              <div class="actions"><button id="drCancel">取消</button><button class="primary" id="drSave">保存规则</button></div>
+              <div class="actions"><button type="button" id="drCancel">取消</button><button class="primary" id="drSave" type="submit">保存规则</button></div>
             </div>
-          </div>
+          </form>
         </div>
       </section>
 
@@ -321,22 +331,17 @@
       <section id="tab-cloud-ip" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3>GeoIP 数据库</h3>
-            <div class="actions muted" id="geoipStatus">加载中…</div>
-          </div>
-          <div class="muted" style="margin-top:6px">
-            底层使用 ip2region xdb 满载版,本地 mmap 查询。
-            云厂商判定按 ISP 字段关键词反推(阿里 / 腾讯 / Cloudflare / 谷歌 / 微软 / AWS / 字节跳动 等)。
-            规则里 <code>from_cloud_ip</code> / <code>country_in</code> / <code>usage_type_in</code> / <code>isp_contains</code> 都走这份库。
+            <div><h3>GeoIP 数据库</h3><p class="section-copy">提供地区、运营商、IP 用途和云厂商判定，供风控规则和请求日志使用。</p></div>
+            <div class="actions section-copy" id="geoipStatus" role="status">加载中…</div>
           </div>
         </div>
         <div class="card">
-          <h3>IP 查询</h3>
-          <div class="filter-bar">
-            <input id="cloudCheckIP" placeholder="IP 地址,如 8.8.8.8 / 47.96.0.1">
-            <button class="primary" id="cloudCheckBtn">查询</button>
-          </div>
-          <div id="geoipResult" style="margin-top:12px"></div>
+          <div class="card-header"><div><h3>IP 查询</h3><p class="section-copy">查看一个 IP 在本地数据库中的结果。</p></div></div>
+          <form id="geoLookupForm" class="list-entry-form">
+            <label class="control-field">IP 地址<input id="cloudCheckIP" required placeholder="例如 8.8.8.8"></label>
+            <button type="submit" class="primary" id="cloudCheckBtn">查询 IP</button>
+          </form>
+          <div id="geoipResult" role="status"></div>
         </div>
       </section>
 
@@ -389,102 +394,85 @@
 
       <!-- 设置 -->
       <section id="tab-settings" class="tab">
-        <div class="settings-grid">
-        <div class="card">
-          <h3>上报密钥 <span class="pill state-soft">即时生效</span></h3>
-          <p class="muted" style="margin:0 0 8px">用于 V2Board 上报接口鉴权，留空则不校验。修改立即生效；请手动更新各机场已部署的接入代码。</p>
-          <div class="inline-form">
-            <input id="reportSecretInput" type="password" autocomplete="off" aria-label="上报密钥" placeholder="留空即关闭校验" disabled>
-            <button class="primary" id="reportSecretSave" disabled>保存</button>
+        <div class="card" id="settingsRuntimeCard" tabindex="-1">
+          <div class="card-header">
+            <div><h3>运行配置</h3><p class="section-copy" id="runtimeSaveMode">正在读取服务信息…</p></div>
+            <div class="actions"><button type="button" data-settings-jump="settingsSecurity">账号与安全</button><span id="runtimeBadge" class="pill state-soft">读取中</span></div>
           </div>
-        </div>
-
-        <div class="card">
-          <h3>修改管理员密码</h3>
-          <div class="form-grid">
-            <div>
-              <label for="pwOld">原密码</label>
-              <input type="password" id="pwOld" autocomplete="current-password">
-            </div>
-            <div>
-              <label for="pwNew">新密码（8–72 字节）</label>
-              <input type="password" id="pwNew" autocomplete="new-password">
-            </div>
-            <div>
-              <label for="pwNew2">确认新密码</label>
-              <input type="password" id="pwNew2" autocomplete="new-password">
-            </div>
-            <div class="form-actions">
-              <button class="primary" id="pwSaveBtn">保存</button>
-            </div>
-          </div>
-          <p class="muted">保存后所有会话失效,需用新密码重新登录。</p>
-        </div>
-
-        <div class="card" id="passthroughCard">
-          <h3>全局跳过风控 <span class="pill state-warning">应急</span></h3>
-          <div class="inline-form">
-            <label class="switch-wrap">
-              <input type="checkbox" id="passthroughToggle" aria-label="全局跳过风控" disabled>
-              <span id="passthroughLabel" role="status">状态未加载</span>
-            </label>
-            <span class="pill state-warning" id="passthroughStatusPill" style="display:none">风控已跳过</span>
-          </div>
-          <p class="muted" style="margin:0">
-            只跳过黑白名单和触发规则，不绕过前置 Nginx 来源校验，也不关闭展示改写和 Lumi 兼容。
-          </p>
-        </div>
-        </div>
-
-        <div class="card">
-          <h3>系统配置 <span class="pill state-soft">重启生效</span></h3>
-          <p class="muted">保存到 SQLite；以下项目在服务重启后生效。机场、名单和触发规则请在各自页面修改。更改监听地址前，请确认端口可用且新的管理地址可达。</p>
+          <dl class="settings-active" aria-label="当前生效值">
+            <div><dt>订阅监听</dt><dd id="runtimeActiveListen">—</dd></div>
+            <div><dt>管理监听</dt><dd id="runtimeActiveAdmin">—</dd></div>
+            <div><dt>入口模式</dt><dd id="runtimeActiveIngress">—</dd></div>
+          </dl>
           <p id="runtimeStatus" class="status-banner" role="status">配置尚未加载。</p>
           <form id="runtimeSettingsForm">
-            <fieldset id="runtimeFields" disabled>
-              <fieldset class="runtime-group">
-                <legend>监听与真实 IP</legend>
-                <p class="muted">来源校验同时适用于订阅和上报；不符合所选入口模式的请求不会进入统计。</p>
-                <div class="form-grid">
-                  <label>订阅监听地址<input name="listen" required placeholder="0.0.0.0:18443"></label>
-                  <label>管理监听地址<input name="admin_listen" required placeholder="127.0.0.1:19090"></label>
-                  <label>外部上报基址（可选）<input name="report_base_url" type="url" placeholder="https://sub.example.com"></label>
-                  <label>订阅入口模式<select name="ingress_mode"><option value="direct">直连前置代理</option><option value="nginx_cloudflare">国内 Nginx → Cloudflare → Sub-Panel</option></select></label>
+            <fieldset id="runtimeFields" class="plain-fieldset" disabled>
+              <fieldset class="settings-group">
+                <legend>监听与入口</legend>
+                <p class="section-copy">来源校验同时适用于订阅和上报。更改管理地址前，请确认新地址和端口可达。</p>
+                <div class="settings-fields">
+                  <label class="control-field">订阅监听地址<input name="listen" required placeholder="0.0.0.0:18443"></label>
+                  <label class="control-field">管理监听地址<input name="admin_listen" required placeholder="127.0.0.1:19090"></label>
+                  <label class="control-field">外部上报基址（可选）<input name="report_base_url" type="url" placeholder="https://sub.example.com"></label>
+                  <label class="control-field">订阅入口模式<select name="ingress_mode"><option value="direct">直连前置代理</option><option value="nginx_cloudflare">国内 Nginx → Cloudflare → Sub-Panel</option></select></label>
                 </div>
-                <div id="ingressDirectFields" class="form-grid">
-                  <label>前置代理 TCP 来源 IP 或 CIDR<textarea name="ingress_proxies" rows="3" required placeholder="每行一项，例如 127.0.0.1"></textarea></label>
-                  <label>真实 IP 请求头的可信代理<textarea name="trust_proxies" rows="3" placeholder="每行一项，例如 127.0.0.1"></textarea></label>
-                  <label>真实 IP 请求头（按顺序）<textarea name="trust_headers" rows="3" placeholder="每行一项"></textarea></label>
+                <div id="ingressDirectFields" class="settings-fields settings-subgroup">
+                  <label class="control-field">前置代理 TCP 来源 IP 或 CIDR<textarea name="ingress_proxies" rows="3" required placeholder="每行一项，例如 127.0.0.1"></textarea></label>
+                  <label class="control-field">真实 IP 请求头的可信代理<textarea name="trust_proxies" rows="3" placeholder="每行一项，例如 127.0.0.1"></textarea></label>
+                  <label class="control-field">真实 IP 请求头（按顺序）<textarea name="trust_headers" rows="3" placeholder="每行一项"></textarea></label>
                   <label class="check-control"><input type="checkbox" name="cloudflare"><span>解析真实 IP 时也信任 Cloudflare 官方 IP 段</span></label>
                 </div>
-                <div id="ingressChainFields" class="form-grid" hidden>
-                  <label>国内 Nginx 公网出口 IP<textarea name="nginx_egress_ips" rows="3" placeholder="每行一个固定的 IPv4 或 IPv6 出口地址"></textarea></label>
-                  <label class="check-control"><input type="checkbox" name="nginx_client_ip"><span>使用国内 Nginx 写入的原始用户 IP</span></label>
-                  <p class="muted">程序定期同步 Cloudflare 官方回源网段，不用手填。仅在 TCP 对端属于 Cloudflare、且 Cloudflare 标记的请求来源为上述 Nginx 时放行。勾选原始用户 IP 前，须在 Nginx 覆盖设置 <code>proxy_set_header X-Sub-Panel-Client-IP $remote_addr;</code>。未提供有效值时，使用 Nginx 出口 IP。</p>
+                <div id="ingressChainFields" class="settings-fields settings-subgroup" hidden>
+                  <label class="control-field">国内 Nginx 公网出口 IP<textarea name="nginx_egress_ips" rows="3" placeholder="每行一个固定 IPv4 或 IPv6 地址"></textarea></label>
+                  <div><label class="check-control"><input type="checkbox" name="nginx_client_ip"><span>使用 Nginx 写入的原始用户 IP</span></label>
+                  <p class="section-copy">Cloudflare 回源网段自动同步。若启用原始 IP，请在国内 Nginx 覆盖设置 <code>proxy_set_header X-Sub-Panel-Client-IP $remote_addr;</code>。</p></div>
                 </div>
               </fieldset>
-              <fieldset class="runtime-group">
-                <legend>存储与 GeoIP</legend>
-                <div class="form-grid">
-                  <label>请求日志保留时间<input name="event_retention" required placeholder="168h"></label>
-                  <label>异常事件保留时间<input name="incident_retention" required placeholder="720h"></label>
-                  <label>批量写入间隔<input name="batch_flush_interval" required placeholder="1s"></label>
-                  <label>单批写入条数<input name="batch_flush_size" type="number" min="1" max="10000" required></label>
-                  <label>GeoIP 数据文件路径（留空禁用）<input name="geoip_path"></label>
+              <fieldset class="settings-group">
+                <legend>日志与 GeoIP</legend>
+                <p class="section-copy">时长使用 <code>168h</code>、<code>1s</code> 等格式。GeoIP 路径留空表示禁用。</p>
+                <div class="settings-fields">
+                  <label class="control-field">请求日志保留<input name="event_retention" required placeholder="168h"></label>
+                  <label class="control-field">异常事件保留<input name="incident_retention" required placeholder="720h"></label>
+                  <label class="control-field">批量写入间隔<input name="batch_flush_interval" required placeholder="1s"></label>
+                  <label class="control-field">单批写入条数<input name="batch_flush_size" type="number" min="1" max="10000" required></label>
+                  <label class="control-field">GeoIP 数据文件路径<input name="geoip_path"></label>
                 </div>
               </fieldset>
-              <fieldset class="runtime-group">
-                <legend>管理员与风控参数</legend>
-                <div class="form-grid">
-                  <label>管理员账号<input name="admin_username" required></label>
-                  <label>登录会话有效期<input name="session_ttl" required placeholder="12h"></label>
+              <fieldset class="settings-group">
+                <legend>会话与兼容</legend>
+                <div class="settings-fields">
+                  <label class="control-field">管理员账号<input name="admin_username" required></label>
+                  <label class="control-field">登录会话有效期<input name="session_ttl" required placeholder="12h"></label>
+                  <label class="control-field">仅跳过触发规则的 IP<textarea name="detection_only_ips" rows="2" placeholder="每行一个 IP"></textarea><small>不等于全局白名单。</small></label>
                   <label class="check-control"><input type="checkbox" name="disable_lumi"><span>停用 Lumi 订阅兼容处理</span></label>
-                  <label>仅跳过触发规则的 IP（不是全局白名单）<textarea name="detection_only_ips" rows="3" placeholder="每行一个 IP"></textarea></label>
                 </div>
               </fieldset>
-              <button class="primary" type="submit">保存系统配置</button>
+              <div class="settings-actions"><span class="section-copy" id="runtimeDraftHint"></span><div class="actions"><button type="button" id="runtimeReset" disabled>恢复已保存值</button><button class="primary" type="submit" id="runtimeSave" disabled>保存运行配置</button></div></div>
             </fieldset>
           </form>
+        </div>
+        <div class="card" id="settingsSecurity" tabindex="-1">
+          <div class="card-header"><div><h3>账号与安全</h3><p class="section-copy">以下操作立即生效，不会重启服务。</p></div><div class="actions"><button type="button" data-settings-jump="settingsRuntimeCard">运行配置</button></div></div>
+          <div class="settings-security-grid">
+            <form class="settings-group" id="reportSecretForm">
+              <h4>上报密钥</h4><p class="section-copy" id="reportSecretStatus" role="status">状态未加载</p>
+              <label class="control-field">V2Board 上报密钥<input id="reportSecretInput" type="password" autocomplete="off" placeholder="留空即关闭校验" disabled></label>
+              <p class="section-copy">修改后请同步更新已部署的上报配置。</p>
+              <div class="form-actions"><button type="submit" class="primary" id="reportSecretSave" disabled>保存密钥</button></div>
+            </form>
+            <form class="settings-group" id="adminPasswordForm">
+              <h4>管理员密码</h4><p class="section-copy" id="passwordStatus" role="status">改密后所有会话会失效。</p>
+              <label class="control-field">原密码<input type="password" id="pwOld" autocomplete="current-password" required></label>
+              <label class="control-field">新密码（8–72 字节）<input type="password" id="pwNew" autocomplete="new-password" required></label>
+              <label class="control-field">确认新密码<input type="password" id="pwNew2" autocomplete="new-password" required></label>
+              <div class="form-actions"><button type="submit" class="primary" id="pwSaveBtn">修改密码</button></div>
+            </form>
+          </div>
+        </div>
+        <div class="card" id="passthroughCard">
+          <div class="card-header"><div><h3>应急：全局跳过风控</h3><p class="section-copy">只跳过黑白名单和触发规则，不绕过入口来源校验，也不关闭订阅展示改写。</p></div><span class="pill state-warning" id="passthroughStatusPill" hidden>风控已跳过</span></div>
+          <label class="check-control"><input type="checkbox" id="passthroughToggle" aria-label="全局跳过风控" disabled><span id="passthroughLabel" role="status">状态未加载</span></label>
         </div>
       </section>
 
@@ -492,14 +480,9 @@
       <section id="tab-tenants" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3>机场列表</h3>
-            <div class="actions">
-              <button class="primary" id="tenantAddBtn">+ 新增机场</button>
-            </div>
+            <div><h3>机场列表</h3><p class="section-copy">按订阅路径前缀路由，与 Host 头无关；路径不可重复。</p></div>
+            <div class="actions"><button type="button" class="primary" id="tenantAddBtn">新增机场</button></div>
           </div>
-          <p class="muted" style="margin:0 0 12px">
-            按 <code>订阅路径</code> 前缀路由,与 Host 头无关。所有机场的订阅路径必须全局唯一。
-          </p>
           <div class="datatable">
             <table>
               <thead><tr>

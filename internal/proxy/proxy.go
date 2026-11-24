@@ -303,7 +303,7 @@ func (g *Gateway) transparentProxyWithLog(
 	tokenHash string, tags []string, action string, start time.Time,
 ) {
 	// 该机场开了展示规则才缓冲改写;没开的机场完全走原有直通路径。
-	display := g.hasDisplayRule(pr.Tenant.Name)
+	display := g.hasDisplayRule(pr.Tenant.Name, pr.UA)
 	if !g.cfg.DisableLumi && isLumiUA(pr.UA) {
 		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, append(tags, "lumi_encrypt"), action, start, display)
 		return
@@ -399,7 +399,7 @@ func (g *Gateway) transparentProxyLumiWithLog(
 	// 展示定制:加密前改写名称字段(只动展示名,不动连接参数)
 	if display {
 		// 先转发后查邮箱:此时上游已同步上报,邮箱通常已落库
-		if opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token); opts != nil {
+		if opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token, pr.UA); opts != nil {
 			if res := rewrite.Apply(decoded, bw.header.Get("Content-Type"), opts); res.Format != "none" {
 				decoded = res.Body
 				tags = append(tags, "fmt_"+res.Format)

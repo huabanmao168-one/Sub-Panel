@@ -10,6 +10,7 @@ User=root
 WorkingDirectory=/opt/Sub-Panel
 UMask=0077
 PrivateTmp=yes
+Environment=SUB_PANEL_SYSTEMD_RESTART=1
 # Existing databases may still point at the legacy /tmp location.
 ExecStartPre=/bin/sh -c 'if test -f /opt/Sub-Panel/ip2region.xdb; then mkdir -p /tmp/sub-panel; ln -sfn /opt/Sub-Panel/ip2region.xdb /tmp/sub-panel/ip2region.xdb; fi'
 ExecStart=/opt/Sub-Panel/sub-panel

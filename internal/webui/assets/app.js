@@ -162,7 +162,7 @@ function apiPost(path, body) { return requestJSON(path, 'POST', body); }
 const TAB_TITLES = {
   'dashboard': '概览',
   'events': '请求日志',
-  'resolved': '已处理 Token',
+  'resolved': '已处理订阅',
   'ip-bans': '黑名单',
   'ip-whitelist': 'IP 白名单',
   'ua-blacklist': 'UA 黑名单',
@@ -776,12 +776,25 @@ $('#blForm').addEventListener('submit', async e => {
   updateBlacklistState();
 });
 
+function filterList(data, term, columns, statusID) {
+  const needle = term.trim().toLowerCase();
+  const visible = data.filter(row => !needle || columns.some(k => String(row[k] || '').toLowerCase().includes(needle)));
+  $(statusID).textContent = needle ? `显示 ${visible.length} / ${data.length} 条` : `共 ${data.length} 条`;
+  return visible;
+}
+
 // ---- IP 白名单 ----
+let ipWhitelist = [];
 async function loadIPWhitelist() {
   const list = await api('/api/ip-whitelist');
-  if (!list) return;
+  if (!Array.isArray(list)) { $('#ipWLSummary').textContent = '加载失败，请刷新重试。'; return; }
+  ipWhitelist = list;
+  renderIPWhitelist();
+}
+function renderIPWhitelist() {
+  const list = filterList(ipWhitelist, $('#ipWLSearch').value, ['Target', 'Note'], '#ipWLSummary');
   const tbody = $('#ipWLTbody'); tbody.replaceChildren();
-  if (!list.length) { setEmptyRow(tbody, '暂无 IP 白名单条目'); return; }
+  if (!list.length) { setEmptyRow(tbody, ipWhitelist.length ? '没有匹配的白名单条目。' : '暂无 IP 白名单条目。'); return; }
   for (const e of list) {
     const tr = document.createElement('tr');
     tr.dataset.id = e.ID;
@@ -791,16 +804,17 @@ async function loadIPWhitelist() {
       <td class="mono ipwl-target">${escapeHTML(e.Target)}</td>
       <td class="ipwl-note">${escapeHTML(e.Note || '')}</td>
       <td class="mono">${escapeHTML(fmtTime(e.CreatedTS))}</td>
-      <td class="ipwl-ops">
-        <button class="ipwl-edit" data-id="${e.ID}">编辑</button>
-        <button class="danger ipwl-del" data-id="${e.ID}">删除</button>
-      </td>
+      <td><div class="table-actions ipwl-ops">
+        <button type="button" class="ipwl-edit" data-id="${e.ID}">编辑</button>
+        <button type="button" class="danger ipwl-del" data-id="${e.ID}">删除</button>
+      </div></td>
     `;
     tbody.appendChild(tr);
   }
 }
 
-// 行内编辑:点'编辑'把两格替换成 input,按钮换'保存/取消'。
+$('#ipWLSearch').addEventListener('input', renderIPWhitelist);
+// Keep row actions aligned when editing in place.
 $('#ipWLTbody').addEventListener('click', async (ev) => {
   const tr = ev.target.closest('tr'); if (!tr) return;
   const id = parseInt(tr.dataset.id, 10);
@@ -816,8 +830,8 @@ $('#ipWLTbody').addEventListener('click', async (ev) => {
   if (ev.target.matches('.ipwl-edit')) {
     const curTarget = tr.dataset.target;
     const curNote = tr.dataset.note;
-    tr.querySelector('.ipwl-target').innerHTML = `<input class="ipwl-edit-target" value="${escapeHTML(curTarget)}" style="width:100%">`;
-    tr.querySelector('.ipwl-note').innerHTML = `<input class="ipwl-edit-note" value="${escapeHTML(curNote)}" style="width:100%">`;
+    tr.querySelector('.ipwl-target').innerHTML = `<input class="ipwl-edit-target table-input" aria-label="编辑 IP 或网段" value="${escapeHTML(curTarget)}">`;
+    tr.querySelector('.ipwl-note').innerHTML = `<input class="ipwl-edit-note table-input" aria-label="编辑备注" value="${escapeHTML(curNote)}">`;
     tr.querySelector('.ipwl-ops').innerHTML = `
       <button class="primary ipwl-save" data-id="${id}">保存</button>
       <button class="ipwl-cancel">取消</button>
@@ -842,34 +856,42 @@ $('#ipWLTbody').addEventListener('click', async (ev) => {
   }
 });
 
-$('#ipWLAddBtn').addEventListener('click', async () => {
+$('#ipWLForm').addEventListener('submit', e => {
+  e.preventDefault();
   const target = $('#ipWLTarget').value.trim();
-  if (!target) return toast('请输入 IP/CIDR', 'error');
-  const r = await apiPost('/api/ip-whitelist/add', { target, note: $('#ipWLNote').value.trim() });
-  if (r && r.ok) {
-    $('#ipWLTarget').value = ''; $('#ipWLNote').value = '';
-    toast('已添加', 'success'); loadIPWhitelist();
-  } else toast((r && r.error) || '失败', 'error');
+  if (!target) return toast('请输入 IP 或网段', 'error');
+  withLoading($('#ipWLAddBtn'), async () => {
+    const r = await apiPost('/api/ip-whitelist/add', {target, note: $('#ipWLNote').value.trim()});
+    if (r?.ok) { $('#ipWLForm').reset(); toast('已添加白名单', 'success'); await loadIPWhitelist(); }
+    else if (r) toast(r.error || '添加失败', 'error');
+  });
 });
 
 // ---- UA 黑名单 ----
+let uaBlacklist = [];
 async function loadUABlacklist() {
   const list = await api('/api/ua-blacklist');
-  if (!list) return;
+  if (!Array.isArray(list)) { $('#uaBlSummary').textContent = '加载失败，请刷新重试。'; return; }
+  uaBlacklist = list;
+  renderUABlacklist();
+}
+function renderUABlacklist() {
+  const list = filterList(uaBlacklist, $('#uaBlSearch').value, ['Pattern', 'Note'], '#uaBlSummary');
   const tbody = $('#uaBlTbody'); tbody.replaceChildren();
-  if (!list.length) { setEmptyRow(tbody, '暂无 UA 黑名单条目'); return; }
+  if (!list.length) { setEmptyRow(tbody, uaBlacklist.length ? '没有匹配的黑名单条目。' : '暂无 UA 黑名单条目。'); return; }
   for (const e of list) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="mono">${escapeHTML(e.Pattern)}</td>
       <td>${escapeHTML(e.Note || '')}</td>
       <td class="mono">${escapeHTML(fmtTime(e.CreatedTS))}</td>
-      <td><button class="danger uabl-del" data-id="${e.ID}">删除</button></td>
+      <td><div class="table-actions"><button type="button" class="danger uabl-del" data-id="${e.ID}">删除</button></div></td>
     `;
     tbody.appendChild(tr);
   }
 }
 
+$('#uaBlSearch').addEventListener('input', renderUABlacklist);
 $('#uaBlTbody').addEventListener('click', async (ev) => {
   if (!ev.target.matches('.uabl-del')) return;
   if (!confirm('删除该 UA 黑名单?')) return;
@@ -879,14 +901,15 @@ $('#uaBlTbody').addEventListener('click', async (ev) => {
   else toast((r && r.error) || '失败', 'error');
 });
 
-$('#uaBlAddBtn').addEventListener('click', async () => {
+$('#uaBlForm').addEventListener('submit', e => {
+  e.preventDefault();
   const pattern = $('#uaBlPattern').value.trim();
   if (!pattern) return toast('请输入 UA 关键词', 'error');
-  const r = await apiPost('/api/ua-blacklist/add', { pattern, note: $('#uaBlNote').value.trim() });
-  if (r && r.ok) {
-    $('#uaBlPattern').value = ''; $('#uaBlNote').value = '';
-    toast('已添加', 'success'); loadUABlacklist();
-  } else toast((r && r.error) || '失败', 'error');
+  withLoading($('#uaBlAddBtn'), async () => {
+    const r = await apiPost('/api/ua-blacklist/add', {pattern, note: $('#uaBlNote').value.trim()});
+    if (r?.ok) { $('#uaBlForm').reset(); toast('已添加 UA 黑名单', 'success'); await loadUABlacklist(); }
+    else if (r) toast(r.error || '添加失败', 'error');
+  });
 });
 
 // ---- 云 IP ----
@@ -895,9 +918,9 @@ async function loadGeoIPInfo() {
   if (!s) return;
   const el = $('#geoipStatus');
   if (s.loaded) {
-    el.innerHTML = `已加载 · 版本 <strong>${escapeHTML(s.version || '-')}</strong> · 路径 <code>${escapeHTML(s.path || '-')}</code>`;
+    el.innerHTML = `<span class="pill pass">已加载</span> <span>${escapeHTML(s.version || '')}</span> <code class="breakable">${escapeHTML(s.path || '')}</code>`;
   } else {
-    el.innerHTML = `<span style="color:var(--danger)">未加载</span> — 请检查 <code>geoip.xdb_path</code> 配置`;
+    el.innerHTML = '<span class="pill state-warning">未加载</span><span>请到设置 → 日志与 GeoIP 检查路径。</span>';
   }
 }
 
@@ -914,36 +937,23 @@ function renderGeoInfo(info) {
     ['时区', info.timezone],
     ['邮编', info.zip_code],
   ];
-  let html = '<table style="width:100%;border-collapse:collapse"><tbody>';
-  for (const [k, v, suffix] of rows) {
-    if (!v) continue;
-    html += `<tr><td style="padding:6px 12px 6px 0;color:var(--muted);width:90px;vertical-align:top">${k}</td>
-             <td style="padding:6px 0"><strong>${escapeHTML(String(v))}</strong>${suffix ? '<span class="muted">' + escapeHTML(suffix) + '</span>' : ''}</td></tr>`;
-  }
-  html += '</tbody></table>';
-  // 云厂商单独标红/橙
-  if (info.cloud_provider) {
-    html = `<div style="margin-bottom:10px;padding:8px 12px;background:#fff7ed;border-left:3px solid #f97316;border-radius:4px">
-      命中云厂商 IP · <strong>${escapeHTML(info.cloud_provider)}</strong>
-    </div>` + html;
-  }
-  return html;
+  const fields = rows.filter(([, value]) => value).map(([key, value, suffix]) =>
+    `<div><dt>${escapeHTML(key)}</dt><dd>${escapeHTML(value)}${escapeHTML(suffix || '')}</dd></div>`);
+  const cloud = info.cloud_provider ? `<p class="status-banner" data-state="pending">云厂商 IP：${escapeHTML(info.cloud_provider)}</p>` : '';
+  return `${cloud}<dl class="settings-active">${fields.join('')}</dl>`;
 }
 
-$('#cloudCheckBtn').addEventListener('click', async () => {
+$('#geoLookupForm').addEventListener('submit', e => {
+  e.preventDefault();
   const ip = $('#cloudCheckIP').value.trim();
   if (!ip) return;
-  const r = await api('/api/geoip/lookup?ip=' + encodeURIComponent(ip));
-  const el = $('#geoipResult');
-  if (!r) { el.innerHTML = '<span class="muted">请求失败</span>'; return; }
-  if (!r.found) {
-    el.innerHTML = `<span class="muted">未找到 ${escapeHTML(ip)} 的记录(IP 不在 xdb 库内或格式错误)</span>`;
-    return;
-  }
-  el.innerHTML = renderGeoInfo(r.info);
-});
-$('#cloudCheckIP').addEventListener('keydown', e => {
-  if (e.key === 'Enter') $('#cloudCheckBtn').click();
+  withLoading($('#cloudCheckBtn'), async () => {
+    const r = await api('/api/geoip/lookup?ip=' + encodeURIComponent(ip));
+    const el = $('#geoipResult');
+    if (!r) { el.textContent = '查询失败，请重试。'; return; }
+    if (!r.found) { el.textContent = `未在 GeoIP 数据库中找到 ${ip}。`; return; }
+    el.innerHTML = renderGeoInfo(r.info);
+  });
 });
 
 // ---- SQLite 系统配置 ----
@@ -952,6 +962,9 @@ const runtimeFields = $('#runtimeFields');
 const runtimeStatus = $('#runtimeStatus');
 const ingressMode = runtimeForm.elements.namedItem('ingress_mode');
 let runtimeBusy = false;
+let runtimeSnapshot = null;
+let runtimeBaseline = '';
+let runtimeError = '';
 function updateIngressFields() {
   const chain = ingressMode.value === 'nginx_cloudflare';
   $('#ingressDirectFields').hidden = chain;
@@ -959,35 +972,16 @@ function updateIngressFields() {
   runtimeForm.elements.namedItem('ingress_proxies').required = !chain;
   runtimeForm.elements.namedItem('nginx_egress_ips').required = chain;
 }
-ingressMode.addEventListener('change', updateIngressFields);
-function renderRuntimeSettings(result) {
-  for (const [key, value] of Object.entries(result.saved)) {
+function writeRuntimeFields(saved) {
+  for (const [key, value] of Object.entries(saved)) {
     const field = runtimeForm.elements.namedItem(key);
     if (!field) continue;
     if (field.type === 'checkbox') field.checked = value;
     else field.value = Array.isArray(value) ? value.join('\n') : value;
   }
   updateIngressFields();
-  runtimeStatus.dataset.state = result.restart_required ? 'pending' : 'active';
-  const mode = result.active.ingress_mode === 'nginx_cloudflare' ? 'Nginx → Cloudflare → Sub-Panel' : '直连前置代理';
-  const addresses = ` 当前监听：订阅 ${result.active.listen}，管理 ${result.active.admin_listen}。当前入口：${mode}。`;
-  runtimeStatus.textContent = (result.restart_required ? '已保存，等待重启。' : '数据库配置已生效。') + addresses;
 }
-async function loadSettings() {
-  if (runtimeBusy) return;
-  runtimeBusy = true;
-  runtimeFields.disabled = true;
-  runtimeStatus.dataset.state = 'loading';
-  runtimeStatus.textContent = '正在加载配置…';
-  const result = await api('/api/settings/runtime');
-  runtimeBusy = false;
-  if (!result) { runtimeStatus.dataset.state = 'error'; runtimeStatus.textContent = '加载失败，请刷新重试。'; return; }
-  renderRuntimeSettings(result);
-  runtimeFields.disabled = false;
-}
-runtimeForm.addEventListener('submit', async e => {
-  e.preventDefault();
-  if (runtimeBusy) return;
+function readRuntimeFields() {
   const body = {};
   for (const field of runtimeForm.elements) {
     if (!field.name) continue;
@@ -996,15 +990,102 @@ runtimeForm.addEventListener('submit', async e => {
     else if (field.tagName === 'TEXTAREA') body[field.name] = field.value.split('\n').map(x => x.trim()).filter(Boolean);
     else body[field.name] = field.value.trim();
   }
+  return body;
+}
+function runtimeDirty() { return runtimeSnapshot !== null && JSON.stringify(readRuntimeFields()) !== runtimeBaseline; }
+function updateRuntimeState() {
+  const r = runtimeSnapshot;
+  const dirty = runtimeDirty();
+  const restarting = Boolean(r?.restart_scheduled);
+  const pending = Boolean(r?.restart_required);
+  const supportsRestart = Boolean(r?.restart_supported);
+  const state = runtimeError ? 'error' : runtimeBusy ? 'loading' : restarting || pending || dirty ? 'pending' : 'active';
+  const badge = $('#runtimeBadge');
+  badge.textContent = runtimeBusy ? '处理中' : restarting ? '正在重启' : dirty ? '未保存' : pending ? '待重启' : r ? '已生效' : '未加载';
+  badge.className = 'pill ' + (state === 'pending' ? 'state-warning' : 'state-soft');
+  runtimeStatus.dataset.state = state;
+  runtimeStatus.textContent = runtimeError || (runtimeBusy ? '正在处理配置…' : restarting ? '配置已保存，服务即将重启。重启后需重新登录；若修改了管理端监听地址，请使用新地址访问。' :
+    dirty ? '有未保存的修改。使用面板内的「刷新」不会覆盖草稿。' : pending ? '已保存，仍在使用旧配置。' : r ? '以下表单与当前运行配置一致。' : '配置尚未加载。');
+  $('#runtimeSaveMode').textContent = supportsRestart ? '保存实际变更后会自动重启服务。' : '保存后需手动重启服务。';
+  $('#runtimeDraftHint').textContent = supportsRestart ? '重启期间订阅与管理面会短暂中断。' : '可从服务管理菜单重启。';
+  $('#runtimeReset').disabled = !dirty || runtimeBusy || restarting;
+  $('#runtimeSave').disabled = !r || runtimeBusy || restarting || !(dirty || (pending && supportsRestart));
+  $('#runtimeSave').textContent = supportsRestart ? (pending && !dirty ? '立即重启' : '保存并重启') : '保存运行配置';
+}
+function renderRuntimeSettings(r) {
+  runtimeError = '';
+  runtimeSnapshot = r;
+  writeRuntimeFields(r.saved);
+  runtimeBaseline = JSON.stringify(readRuntimeFields());
+  $('#runtimeActiveListen').textContent = r.active.listen;
+  $('#runtimeActiveAdmin').textContent = r.active.admin_listen;
+  $('#runtimeActiveIngress').textContent = r.active.ingress_mode === 'nginx_cloudflare' ? 'Nginx → Cloudflare → Sub-Panel' : '直连前置代理';
+  runtimeFields.disabled = Boolean(r.restart_scheduled);
+  updateRuntimeState();
+}
+async function loadSettings() {
+  if (runtimeBusy || runtimeDirty() || runtimeSnapshot?.restart_scheduled) return;
   runtimeBusy = true;
+  runtimeError = '';
   runtimeFields.disabled = true;
-  const result = await requestJSON('/api/settings/runtime', 'PUT', body);
+  updateRuntimeState();
+  const r = await api('/api/settings/runtime');
   runtimeBusy = false;
-  runtimeFields.disabled = false;
-  if (!result || result.ok === false) { toast(result?.error || '保存失败', 'error'); return; }
-  renderRuntimeSettings(result);
-  toast(result.restart_required ? '已保存，重启后生效' : '已保存', 'success');
+  if (!r?.saved || !r?.active) {
+    runtimeError = runtimeSnapshot ? '刷新失败，仍显示上次读取的配置。' : '加载失败，请刷新重试。';
+    runtimeFields.disabled = !runtimeSnapshot;
+    updateRuntimeState();
+    return;
+  }
+  renderRuntimeSettings(r);
+}
+for (const event of ['input', 'change']) runtimeForm.addEventListener(event, () => {
+  updateIngressFields(); runtimeError = ''; updateRuntimeState();
 });
+$('#runtimeReset').addEventListener('click', () => {
+  if (!runtimeSnapshot) return;
+  runtimeError = '';
+  writeRuntimeFields(runtimeSnapshot.saved);
+  updateRuntimeState();
+});
+$$('[data-settings-jump]').forEach(btn => btn.addEventListener('click', () => {
+  const target = document.getElementById(btn.dataset.settingsJump);
+  target?.focus({preventScroll: true});
+  target?.scrollIntoView({block: 'start'});
+}));
+async function waitForRuntimeRestart() {
+  for (let attempt = 0; attempt < 22; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    try {
+      const r = await fetch('/api/session', {cache: 'no-store', signal: AbortSignal.timeout(2000)});
+      if (r.status === 401) { location.replace('/login'); return; }
+    } catch { /* Service is temporarily unavailable while systemd restarts it. */ }
+  }
+  runtimeStatus.textContent = '未能自动确认重启。请检查服务状态，或通过新的管理地址重新登录。';
+}
+async function saveRuntimeSettings(e) {
+  e.preventDefault();
+  if (runtimeBusy || !runtimeSnapshot || $('#runtimeSave').disabled) return;
+  const body = readRuntimeFields();
+  runtimeBusy = true;
+  runtimeError = '';
+  runtimeFields.disabled = true;
+  updateRuntimeState();
+  const result = await requestJSON('/api/settings/runtime?restart=1', 'PUT', body);
+  runtimeBusy = false;
+  if (!result?.saved || result.ok === false) {
+    runtimeFields.disabled = false;
+    runtimeError = result?.error || '保存失败，请重试。';
+    updateRuntimeState();
+    return;
+  }
+  renderRuntimeSettings(result);
+  if (result.restart_scheduled) {
+    toast('配置已保存，正在重启服务', 'success');
+    if (result.active.admin_listen === result.saved.admin_listen) waitForRuntimeRestart();
+  } else toast(result.restart_required ? '已保存，请手动重启' : '配置已生效', 'success');
+}
+runtimeForm.addEventListener('submit', saveRuntimeSettings);
 
 // ---- 工具(token hash 工具已删除,v2board 重置就失效) ----
 
@@ -1478,7 +1559,7 @@ let passthroughBusy = false;
 function renderPassthrough(enabled) {
   $('#passthroughToggle').checked = enabled;
   $('#passthroughLabel').textContent = enabled ? '已开启' : '已关闭';
-  $('#passthroughStatusPill').style.display = enabled ? '' : 'none';
+  $('#passthroughStatusPill').hidden = !enabled;
 }
 async function loadPassthrough() {
   if (passthroughBusy) return;
@@ -1494,36 +1575,47 @@ async function loadPassthrough() {
 }
 
 let reportBusy = false;
+let reportSaved = null;
 const reportInput = $('#reportSecretInput');
 const reportSave = $('#reportSecretSave');
+function reportDirty() { return reportSaved !== null && reportInput.value.trim() !== reportSaved; }
+function renderReportState() {
+  reportInput.disabled = reportBusy || reportSaved === null;
+  reportSave.disabled = reportInput.disabled || !reportDirty();
+  $('#reportSecretStatus').textContent = reportBusy ? '处理中…' : reportSaved === null ? '未加载，点击刷新重试。' :
+    reportDirty() ? '密钥有未保存的修改。' : reportSaved ? '已启用密钥校验。' : '未配置密钥，上报接口不校验。';
+}
 async function loadReportSecret() {
-  if (reportBusy) return;
+  if (reportBusy || reportDirty()) return;
   reportBusy = true;
-  reportInput.disabled = reportSave.disabled = true;
+  renderReportState();
   const r = await api('/api/report-info');
   reportBusy = false;
-  if (!r) return;
-  reportInput.value = r.report_secret || '';
-  reportInput.disabled = reportSave.disabled = false;
+  if (r) { reportSaved = r.report_secret || ''; reportInput.value = reportSaved; }
+  renderReportState();
 }
-
-reportSave.addEventListener('click', async () => {
+reportInput.addEventListener('input', renderReportState);
+$('#reportSecretForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (reportBusy || !reportDirty()) return;
   const val = reportInput.value.trim();
   if (!val && !confirm('清除密钥后，上报接口将不再校验密钥。确认清除？')) return;
   reportBusy = true;
-  reportInput.disabled = reportSave.disabled = true;
-  const r = await apiPost('/api/report-info/save', { report_secret: val });
+  renderReportState();
+  const r = await apiPost('/api/report-info/save', {report_secret: val});
   reportBusy = false;
-  reportInput.disabled = reportSave.disabled = false;
   if (r?.ok) {
+    reportSaved = val;
     reportInput.value = val;
-    toast(val ? '密钥已保存。请同步更新各机场的上报代码。' : '密钥已清除（上报接口不校验）', 'success');
-  } else if (r) {
-    toast(r.error || '保存失败', 'error');
-  }
+    toast(val ? '密钥已保存，请同步更新上报代码。' : '密钥已清除（上报接口不校验）', 'success');
+  } else if (r) toast(r.error || '保存失败', 'error');
+  renderReportState();
 });
 
-$('#pwSaveBtn')?.addEventListener('click', async e => {
+$('#adminPasswordForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('#pwSaveBtn');
+  if (btn.disabled) return;
   const oldP = $('#pwOld').value;
   const newP = $('#pwNew').value;
   const newP2 = $('#pwNew2').value;
@@ -1531,15 +1623,17 @@ $('#pwSaveBtn')?.addEventListener('click', async e => {
   const bytes = new TextEncoder().encode(newP).length;
   if (bytes < 8 || bytes > 72) { toast('新密码须为 8–72 字节', 'error'); return; }
   if (newP !== newP2) { toast('两次输入的新密码不一致', 'error'); return; }
-  const btn = e.currentTarget;
   btn.disabled = true;
+  $('#passwordStatus').textContent = '正在修改密码…';
   const r = await apiPost('/api/auth/change_password', { old_password: oldP, new_password: newP });
   if (r?.ok) {
+    $('#passwordStatus').textContent = '密码已修改，请重新登录。';
     for (const id of ['#pwOld', '#pwNew', '#pwNew2']) $(id).value = '';
     toast('密码已修改，即将退出登录…', 'success');
     setTimeout(() => { location.href = '/login'; }, 1500);
   } else {
     btn.disabled = false;
+    $('#passwordStatus').textContent = r?.error || '未修改密码，请重试。';
     if (r) toast(r.error || '修改失败', 'error');
   }
 });
@@ -1822,9 +1916,11 @@ async function withLoading(btn, run) {
 
 // ---- 订阅展示规则 ----
 let drEditingId = 0;
-let drEditingSort = 0;
 let drOriginalReplacements = '';
-const DR_MATCH_LABELS = { email_suffix: '邮箱后缀', email_exact: '完整邮箱', email_keyword: '邮箱关键词', all: '全部订阅' };
+const DR_MATCH_LABELS = {
+  email_suffix: '邮箱后缀', email_exact: '完整邮箱', email_keyword: '邮箱关键词', all: '全部已上报邮箱的订阅',
+  ua_contains: 'UA 包含', ua_not_contains: 'UA 不包含',
+};
 let drRules = [];
 let drTenants = [];
 
@@ -1843,15 +1939,16 @@ async function loadDisplayRules() {
   for (const r of drRules) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
+      <td class="mono">${Number(r.sort_order)}</td>
       <td>${escapeHTML(r.name)}</td>
-      <td>${escapeHTML(r.tenant || '')}</td>
-      <td>${escapeHTML(DR_MATCH_LABELS[r.match_type] || '未知')} ${r.match_type === 'all' ? '' : escapeHTML(r.match_value || '—')}</td>
+      <td>${escapeHTML(r.tenant || '—')}</td>
+      <td>${escapeHTML(DR_MATCH_LABELS[r.match_type] || '未知')}${r.match_type === 'all' ? '' : `：${escapeHTML(r.match_value || '—')}`}</td>
       <td>${escapeHTML(r.airport_to || '不改')}</td>
-      <td>${r.enabled ? '启用' : '禁用'}</td>
-      <td>
-        <button class="dr-edit" data-id="${r.id}">编辑</button>
-        <button class="danger dr-del" data-id="${r.id}">删除</button>
-      </td>
+      <td><span class="pill ${r.enabled ? 'pass' : 'empty'}">${r.enabled ? '已启用' : '已停用'}</span></td>
+      <td><div class="table-actions">
+        <button type="button" class="dr-edit" data-id="${Number(r.id)}">编辑</button>
+        <button type="button" class="danger dr-del" data-id="${Number(r.id)}">删除</button>
+      </div></td>
     `;
     tbody.appendChild(tr);
   }
@@ -1879,7 +1976,7 @@ function drFillTenantSelect(current) {
 function drRepsToText(json) {
   let reps = [];
   try { reps = JSON.parse(json || '[]') || []; } catch (e) { reps = []; }
-  return reps.map(p => (p.from || '') + '=' + (p.to || '')).join('\n');
+  return (Array.isArray(reps) ? reps : []).map(p => (p?.from || '') + '=' + (p?.to || '')).join('\n');
 }
 
 function drTextToReps(text) {
@@ -1896,15 +1993,21 @@ function drTextToReps(text) {
 }
 function drUpdateMatch() {
   const type = $('#drMatchType').value;
+  const ua = type === 'ua_contains' || type === 'ua_not_contains';
+  const input = $('#drMatchValue');
   $('#drMatchRow').hidden = type === 'all';
-  $('#drMatchValue').disabled = type === 'all';
-  $('#drMatchValue').placeholder = type === 'email_suffix' ? '例如：example.com' : type === 'email_exact' ? '例如：user@example.com' : '例如：team';
+  input.disabled = type === 'all';
+  input.required = type !== 'all';
+  $('#drMatchLabel').textContent = ua ? 'UA 关键词' : '邮箱匹配值';
+  input.placeholder = ua ? '例如 Clash 或 Shadowrocket' : type === 'email_suffix' ? '例如 example.com' : type === 'email_exact' ? '例如 user@example.com' : '例如 team';
+  $('#drMatchHint').textContent = ua ? '只检查当前请求的 User-Agent，忽略大小写，不需要邮箱上报；没有 UA 的请求不匹配。' : '按 V2Board 上报的邮箱判断，未上报邮箱时不匹配。';
 }
 $('#drMatchType').addEventListener('change', drUpdateMatch);
 
 function drResetForm(r) {
   drEditingId = r ? r.id : 0;
-  drEditingSort = r ? r.sort_order : drRules.length * 10;
+  const last = drRules.reduce((max, row) => Math.max(max, Number(row.sort_order) || 0), -10);
+  $('#drSortOrder').value = r ? r.sort_order : Math.min(Number.MAX_SAFE_INTEGER, last + 10);
   $('#drModalTitle').textContent = r ? '编辑规则' : '新增规则';
   $('#drName').value = r ? (r.name || '') : '';
   drFillTenantSelect(r ? r.tenant : '');
@@ -1944,7 +2047,7 @@ function drPayload() {
     scope_group: true,
     scope_header: true,
     enabled: $('#drEnabled').checked,
-    sort_order: drEditingSort,
+    sort_order: Number($('#drSortOrder').value),
   };
 }
 
@@ -1970,12 +2073,15 @@ $('#drTbody').addEventListener('click', async (ev) => {
   }
 });
 
-$('#drSave').addEventListener('click', e => withLoading(e.currentTarget, async () => {
+$('#drForm').addEventListener('submit', e => {
+  e.preventDefault();
+  withLoading($('#drSave'), async () => {
   let body;
   try { body = drPayload(); } catch (err) { return toast(err.message, 'error'); }
   if (!body.name) return toast('请填写规则名', 'error');
   if (!body.tenant) return toast('请选择机场', 'error');
   if (body.match_type !== 'all' && !body.match_value) return toast('请填写匹配值', 'error');
+  if (!Number.isSafeInteger(body.sort_order)) return toast('优先级必须是整数', 'error');
   if (!body.airport_to && !JSON.parse(body.replacements).length) return toast('请填写新机场名或至少一条关键词替换。', 'error');
   const res = await apiPost('/api/display-rules/save', body);
   if (res && res.ok) {
@@ -1985,4 +2091,5 @@ $('#drSave').addEventListener('click', e => withLoading(e.currentTarget, async (
   } else {
     toast((res && res.error) || '保存失败', 'error');
   }
-}));
+  });
+});

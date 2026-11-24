@@ -35,36 +35,43 @@ func (g *Gateway) DisplayRuleCount() int {
 }
 
 // hasDisplayRule 该机场是否有启用的规则;没有就完全走原有直通路径,不缓冲、不查库。
-func (g *Gateway) hasDisplayRule(tenant string) bool {
+func (g *Gateway) hasDisplayRule(tenant, ua string) bool {
 	s := g.displayRules.Load()
 	if s == nil {
 		return false
 	}
 	for i := range s.rules {
-		if s.rules[i].Enabled && s.rules[i].Tenant == tenant {
+		r := &s.rules[i]
+		if r.Enabled && r.Tenant == tenant && (!r.UsesUserAgent() || r.Matches(tenant, "", ua)) {
 			return true
 		}
 	}
 	return false
 }
 
-// matchDisplayRule 按 token 找邮箱,再按排序取第一条命中的启用规则。
-// 未命中、查不到邮箱、规则为空都返回 nil。
-func (g *Gateway) matchDisplayRule(tenant, token string) *rewrite.Options {
+// UA rules use the current request. Email data is loaded lazily only when an
+// enabled email-based rule could match, preserving the first-match priority.
+func (g *Gateway) matchDisplayRule(tenant, token, ua string) *rewrite.Options {
 	s := g.displayRules.Load()
-	if s == nil || len(s.rules) == 0 || token == "" {
+	if s == nil {
 		return nil
 	}
 	var email string
-	if rep, err := g.st.GetUserReportByToken(g.hasher.Hash(token), tenant); err == nil && rep != nil {
-		email = rep.Email
-	}
-	if email == "" {
-		return nil
-	}
+	lookedUp := false
 	for i := range s.rules {
 		r := &s.rules[i]
-		if !r.Matches(tenant, email) {
+		if !r.Enabled || (r.Tenant != "" && r.Tenant != tenant) {
+			continue
+		}
+		if !r.UsesUserAgent() && !lookedUp {
+			lookedUp = true
+			if token != "" {
+				if rep, err := g.st.GetUserReportByToken(g.hasher.Hash(token), tenant); err == nil && rep != nil {
+					email = rep.Email
+				}
+			}
+		}
+		if !r.Matches(tenant, email, ua) {
 			continue
 		}
 		return optionsOf(r)
@@ -138,7 +145,7 @@ func (g *Gateway) transparentProxyDisplay(
 	}
 
 	// 先转发后查邮箱:上游处理订阅时已同步上报,此时邮箱通常已落库,首次拉取也能命中。
-	opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token)
+	opts := g.matchDisplayRule(pr.Tenant.Name, pr.Token, pr.UA)
 	if opts == nil {
 		for k, vs := range bw.header {
 			for _, v := range vs {

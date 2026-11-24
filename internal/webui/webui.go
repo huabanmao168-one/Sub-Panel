@@ -39,22 +39,24 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg           *config.Config
-	st            *store.Store
-	bans          *banlist.List
-	hasher        *token.Hasher
-	cloud         *cloudip.Matcher
-	fetcher       *cloudip.Fetcher
-	rules         *rules.Manager
-	gw            *proxy.Gateway
-	det           *detector.Detector
-	bl            *blacklist.Manager
-	settingsMu    sync.Mutex
-	policyMu      sync.Mutex
-	verifiedSince time.Time
-	sessionMu     sync.RWMutex
-	sessions      map[string]session
-	logger        *slog.Logger
+	cfg                  *config.Config
+	st                   *store.Store
+	bans                 *banlist.List
+	hasher               *token.Hasher
+	cloud                *cloudip.Matcher
+	fetcher              *cloudip.Fetcher
+	rules                *rules.Manager
+	gw                   *proxy.Gateway
+	det                  *detector.Detector
+	bl                   *blacklist.Manager
+	settingsMu           sync.Mutex
+	runtimeRestart       func()
+	runtimeRestartQueued bool
+	policyMu             sync.Mutex
+	verifiedSince        time.Time
+	sessionMu            sync.RWMutex
+	sessions             map[string]session
+	logger               *slog.Logger
 }
 
 type session struct {

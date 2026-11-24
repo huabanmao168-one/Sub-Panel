@@ -15,12 +15,18 @@ import (
 //   - email_suffix  邮箱后缀,如 auto.com(匹配 xxx@auto.com)
 //   - email_exact   邮箱全等
 //   - email_keyword 邮箱包含
-//   - all           该机场全部用户
+//   - all           该机场所有已上报邮箱的订阅
+//   - ua_contains / ua_not_contains  按实际请求的客户端 UA 匹配
+const (
+	DisplayMatchUAContains    = "ua_contains"
+	DisplayMatchUANotContains = "ua_not_contains"
+)
+
 type DisplayRule struct {
 	ID           int64     `json:"id"`
 	Name         string    `json:"name"`         // 规则名,仅管理面展示
 	Tenant       string    `json:"tenant"`       // 机场名,空=全部机场
-	MatchType    string    `json:"match_type"`   // email_suffix|email_exact|email_keyword|all
+	MatchType    string    `json:"match_type"`   // email_suffix|email_exact|email_keyword|all|ua_contains|ua_not_contains
 	MatchValue   string    `json:"match_value"`  // 匹配值,all 时忽略
 	AirportFrom  string    `json:"airport_from"` // 原机场名(可空)
 	AirportTo    string    `json:"airport_to"`   // 新机场名(空=不改)
@@ -47,6 +53,11 @@ func (r *DisplayRule) Validate() error {
 		if r.MatchValue == "" {
 			return errors.New("匹配值不能为空")
 		}
+	case DisplayMatchUAContains, DisplayMatchUANotContains:
+		r.MatchValue = strings.TrimSpace(r.MatchValue)
+		if r.MatchValue == "" || len(r.MatchValue) > 512 || strings.ContainsAny(r.MatchValue, "\r\n") {
+			return errors.New("UA 关键字不能为空，且须为单行、不超过 512 字节")
+		}
 	case "all":
 	default:
 		return errors.New("匹配方式非法")
@@ -72,19 +83,35 @@ func (r *DisplayRule) Validate() error {
 	return nil
 }
 
-// Matches 判断邮箱是否命中本规则。tenant 不匹配直接 false。
-func (r *DisplayRule) Matches(tenant, email string) bool {
+func (r *DisplayRule) UsesUserAgent() bool {
+	return r.MatchType == DisplayMatchUAContains || r.MatchType == DisplayMatchUANotContains
+}
+
+// Matches applies the rule's selected condition to the current subscription request.
+func (r *DisplayRule) Matches(tenant, email, ua string) bool {
 	if !r.Enabled {
 		return false
 	}
 	if r.Tenant != "" && r.Tenant != tenant {
 		return false
 	}
-	if r.MatchType == "all" {
-		return true
+	if r.UsesUserAgent() {
+		ua, keyword := strings.TrimSpace(ua), strings.TrimSpace(r.MatchValue)
+		// A missing UA must not make a negative match act as a catch-all.
+		if ua == "" || keyword == "" {
+			return false
+		}
+		contains := strings.Contains(strings.ToLower(ua), strings.ToLower(keyword))
+		if r.MatchType == DisplayMatchUANotContains {
+			return !contains
+		}
+		return contains
 	}
 	if email == "" {
 		return false
+	}
+	if r.MatchType == "all" {
+		return true
 	}
 	at := lastIndexByte(email, '@')
 	domain := ""

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/huabanmao168/SubPanel/internal/config"
 )
@@ -69,6 +70,54 @@ func TestRuntimeSettingsSaveAndValidate(t *testing.T) {
 	get = request("GET", path, nil, true)
 	if err := json.NewDecoder(get.Body).Decode(&result); err != nil || result.RestartRequired {
 		t.Fatalf("settings still pending after reload: %v", err)
+	}
+}
+
+func TestRuntimeRestartScheduledOnlyAfterSuccessfulChangedSave(t *testing.T) {
+	srv, st, _ := setup(t)
+	calls := make(chan struct{}, 2)
+	srv.SetRuntimeRestart(func() { calls <- struct{}{} })
+	h := srv.Handler()
+	cookie := login(t, h)
+	put := func(cfg config.RuntimeSettings, suffix string) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(cfg)
+		req := httptest.NewRequest(http.MethodPut, "/api/settings/runtime"+suffix, bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	cfg := srv.cfg.RuntimeSettings()
+	if w := put(cfg, "?restart=1"); w.Code != 200 || !strings.Contains(w.Body.String(), `"restart_scheduled":false`) {
+		t.Fatal("unchanged settings requested restart")
+	}
+	cfg.BatchFlushSize = 0
+	if w := put(cfg, "?restart=1"); w.Code != 400 {
+		t.Fatal("invalid config was saved")
+	}
+	cfg.BatchFlushSize = 333
+	if w := put(cfg, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"restart_scheduled":false`) {
+		t.Fatal("non-UI API save must not restart unless requested")
+	}
+	if w := put(cfg, "?restart=1"); w.Code != 200 || !strings.Contains(w.Body.String(), `"restart_scheduled":true`) {
+		t.Fatalf("changed config did not schedule restart: %d", w.Code)
+	}
+	if w := put(cfg, "?restart=1"); w.Code != 409 {
+		t.Fatal("settings update not blocked during a scheduled restart")
+	}
+	if saved, err := st.RuntimeConfig(); err != nil || saved.Storage.BatchFlushSize != 333 {
+		t.Fatal("restart scheduled without persisting config")
+	}
+	select {
+	case <-calls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restart callback was not invoked")
+	}
+	select {
+	case <-calls:
+		t.Fatal("restart scheduled twice")
+	default:
 	}
 }
 

@@ -307,6 +307,46 @@ func TestDisplayRuleLumiRewritesBeforeEncrypt(t *testing.T) {
 	}
 }
 
+func TestDisplayRuleMatchesCurrentUAWithoutEmailOrToken(t *testing.T) {
+	for _, tt := range []struct {
+		name, mode, ua, match string
+		rewrite               bool
+	}{
+		{"contains ignoring case", store.DisplayMatchUAContains, "FixtureCLASH/2.1", "clash", true},
+		{"contains miss", store.DisplayMatchUAContains, "Shadowrocket/2.1", "clash", false},
+		{"not contains match", store.DisplayMatchUANotContains, "Shadowrocket/2.1", "CLASH", true},
+		{"not contains ignores case", store.DisplayMatchUANotContains, "Clash/2.1", "cLaSh", false},
+		{"missing UA is never a negative match", store.DisplayMatchUANotContains, "", "clash", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gw, st, cleanup := newDisplayE2E(t, false)
+			defer cleanup()
+			installRule(t, gw, st, store.DisplayRule{
+				Name: "UA rule", MatchType: tt.mode, MatchValue: tt.match,
+				AirportFrom: "花瓣", AirportTo: "云帆", Enabled: true, ScopeNode: true, ScopeGroup: true, ScopeHeader: true,
+			})
+			w := httptest.NewRecorder()
+			gw.ServeHTTP(w, mkSubReq("sub.example.com", tt.ua, "", "clash", "192.0.2.3"))
+			if w.Code != 200 || strings.Contains(w.Body.String(), "云帆 香港 01") != tt.rewrite || !strings.Contains(w.Body.String(), "hk1.example.com") || !strings.Contains(w.Body.String(), "SecretPW123") {
+				t.Fatalf("unexpected UA rewrite: status=%d body=%q", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestDisplayRuleUARewritesBeforeLumiEncryption(t *testing.T) {
+	gw, st, cleanup := newDisplayE2E(t, false)
+	defer cleanup()
+	installRule(t, gw, st, store.DisplayRule{Name: "only lumi", MatchType: store.DisplayMatchUAContains, MatchValue: "LuMi", AirportFrom: "花瓣", AirportTo: "云帆", Enabled: true, ScopeNode: true, ScopeGroup: true, ScopeHeader: true})
+	const token = "fixture-lumi-ua-0001"
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Lumi app", token, "clash", "192.0.2.4"))
+	plain, ok := decryptLumiSubscriptionForTest(&parser.Request{Token: token}, w.Body.Bytes())
+	if w.Code != 200 || !ok || !strings.Contains(string(plain), "云帆 香港 01") {
+		t.Fatal("UA display rule did not affect Lumi plaintext before encryption")
+	}
+}
+
 func TestDisplayRuleFirstMatchWins(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, false)
 	defer cleanup()
