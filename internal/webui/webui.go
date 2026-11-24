@@ -9,6 +9,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -37,20 +38,22 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg       *config.Config
-	st        *store.Store
-	bans      *banlist.List
-	hasher    *token.Hasher
-	cloud     *cloudip.Matcher
-	fetcher   *cloudip.Fetcher
-	rules     *rules.Manager
-	gw        *proxy.Gateway
-	det       *detector.Detector
-	bl        *blacklist.Manager
-	hmacKey   []byte
-	sessionMu sync.RWMutex
-	sessions  map[string]session
-	logger    *slog.Logger
+	cfg           *config.Config
+	st            *store.Store
+	bans          *banlist.List
+	hasher        *token.Hasher
+	cloud         *cloudip.Matcher
+	fetcher       *cloudip.Fetcher
+	rules         *rules.Manager
+	gw            *proxy.Gateway
+	det           *detector.Detector
+	bl            *blacklist.Manager
+	settingsMu    sync.Mutex
+	policyMu      sync.Mutex
+	verifiedSince time.Time
+	sessionMu     sync.RWMutex
+	sessions      map[string]session
+	logger        *slog.Logger
 }
 
 type session struct {
@@ -62,11 +65,6 @@ func NewServer(cfg *config.Config, st *store.Store, bans *banlist.List, hasher *
 	cloud *cloudip.Matcher, fetcher *cloudip.Fetcher,
 	rulesMgr *rules.Manager, gw *proxy.Gateway, det *detector.Detector,
 	bl *blacklist.Manager, logger *slog.Logger) *Server {
-	key := []byte(cfg.Admin.SessionKey)
-	if len(key) == 0 {
-		key = make([]byte, 32)
-		_, _ = rand.Read(key)
-	}
 	return &Server{
 		cfg:      cfg,
 		st:       st,
@@ -78,7 +76,6 @@ func NewServer(cfg *config.Config, st *store.Store, bans *banlist.List, hasher *
 		gw:       gw,
 		det:      det,
 		bl:       bl,
-		hmacKey:  key,
 		sessions: map[string]session{},
 		logger:   logger,
 	}
@@ -99,6 +96,10 @@ func (s *Server) Handler() http.Handler {
 
 	// 需要登录
 	mux.Handle("/", s.auth(http.HandlerFunc(s.indexPage)))
+	mux.Handle("/api/session", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, 200, map[string]string{"username": s.cfg.Admin.Username})
+	})))
 	mux.Handle("/api/summary", s.auth(http.HandlerFunc(s.apiSummary)))
 	mux.Handle("/api/events", s.auth(http.HandlerFunc(s.apiEvents)))
 	mux.Handle("/api/events/purge", s.auth(http.HandlerFunc(s.apiEventsPurge)))
@@ -120,10 +121,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/detect_rules", s.auth(http.HandlerFunc(s.apiDetectRules)))
 	mux.Handle("/api/detect_rules/save", s.auth(http.HandlerFunc(s.apiDetectRuleSave)))
 	mux.Handle("/api/detect_rules/remove", s.auth(http.HandlerFunc(s.apiDetectRuleRemove)))
-	mux.Handle("/api/config", s.auth(http.HandlerFunc(s.apiConfig)))
-	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
-	mux.Handle("/api/notifier/update", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
-	mux.Handle("/api/test-notify", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
+	mux.Handle("/api/settings/runtime", s.auth(http.HandlerFunc(s.apiRuntimeSettings)))
+	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
+	})))
+	mux.Handle("/api/notifier/update", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
+	})))
+	mux.Handle("/api/test-notify", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
+	})))
 	mux.Handle("/api/auth/change_password", s.auth(http.HandlerFunc(s.apiChangePassword)))
 	mux.Handle("/api/settings/passthrough", s.auth(http.HandlerFunc(s.apiPassthrough)))
 
@@ -139,7 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/ua-blacklist/remove", s.auth(http.HandlerFunc(s.apiUABlacklistRemove)))
 
 	// 触发规则运维:清掉某 token 在滑窗里的累计,把误判 token "拉出来"。
-	// 下次再触发规则,继续按正常路径投毒(不是免疫,是 reset)。
+	// 下次再触发规则仍会正常拒绝；重置不等于免疫。
 	mux.Handle("/api/detector/reset-token", s.auth(http.HandlerFunc(s.apiDetectorResetToken)))
 
 	// 云 IP 库(底层走 GeoIP xdb,保留旧路径兼容)
@@ -211,10 +218,12 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "invalid credentials"})
 		return
 	}
-	// 优先用 store.meta 里的密码哈希(改密后写入),没有就 fallback yaml
-	pwHash := s.cfg.Admin.PasswordHash
-	if v, _ := s.st.GetMeta("admin_password_hash"); v != "" {
-		pwHash = v
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	pwHash, err := s.st.GetMeta("admin_password_hash")
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": "读取管理员凭据失败"})
+		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(body.Password)); err != nil {
 		writeJSON(w, 401, map[string]any{"error": "invalid credentials"})
@@ -259,6 +268,17 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 
 // ---------- API ----------
 
+// SetVerifiedIngressSince is called during startup, before serving requests.
+func (s *Server) SetVerifiedIngressSince(since time.Time) { s.verifiedSince = since }
+
+func (s *Server) statsSince(window time.Duration) time.Time {
+	since := time.Now().Add(-window)
+	if since.Before(s.verifiedSince) {
+		return s.verifiedSince
+	}
+	return since
+}
+
 func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 	tenant := r.URL.Query().Get("tenant")
 	winStr := r.URL.Query().Get("window")
@@ -266,7 +286,7 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil || dur <= 0 {
 		dur = 24 * time.Hour
 	}
-	st, err := s.st.Summary(r.Context(), tenant, time.Now().Add(-dur))
+	st, err := s.st.Summary(r.Context(), tenant, s.statsSince(dur))
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -299,7 +319,17 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	q := r.URL.Query()
+	lookup := q.Get("token") // backward-compatible API; the UI uses the header
+	if header := r.Header.Get("X-Subscription-Lookup"); header != "" {
+		decoded, err := url.PathUnescape(header)
+		if err != nil || len(decoded) > 4096 {
+			writeJSON(w, 400, map[string]any{"error": "无效的订阅查询值"})
+			return
+		}
+		lookup = decoded
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	winStr := q.Get("window")
@@ -310,18 +340,39 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	f := store.EventFilter{
 		Tenant:    q.Get("tenant"),
 		ClientIP:  q.Get("ip"),
-		TokenHash: q.Get("token"),
+		TokenHash: s.hasher.Lookup(lookup),
 		Action:    q.Get("action"),
 		Usage:     strings.ToUpper(strings.TrimSpace(q.Get("usage"))),
 		UA:        q.Get("ua"),
-		Since:     time.Now().Add(-dur),
+		Since:     s.statsSince(dur),
 		Limit:     limit,
 		Offset:    offset,
 	}
 	// 默认隐藏白名单 IP 的请求(走 rules.IPWhitelisted,支持 CIDR)。
 	// show_whitelist=1 时显示。单 IP 精确查询时也跳过过滤(用户显式要看)。
 	hideWL := q.Get("show_whitelist") != "1" && f.ClientIP == ""
-	evs, err := s.st.QueryEvents(r.Context(), f)
+	visible := func(e store.Event) bool {
+		return !hideWL || e.ClientIP == "" || s.rules == nil || !s.rules.IPWhitelisted(e.ClientIP)
+	}
+	paged := q.Get("page") == "cursor"
+	var next string
+	var evs []store.Event
+	var err error
+	if paged {
+		if f.Limit < 1 || f.Limit > 100 {
+			f.Limit = 50
+		}
+		f.Offset = 0
+		if cursor := q.Get("cursor"); cursor != "" {
+			if f.BeforeTS, f.BeforeID, err = parseEventCursor(cursor); err != nil {
+				writeJSON(w, 400, map[string]any{"error": "无效的日志分页游标"})
+				return
+			}
+		}
+		evs, next, err = s.eventPage(r.Context(), f, visible)
+	} else {
+		evs, err = s.st.QueryEvents(r.Context(), f)
+	}
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -338,7 +389,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	gi := geoip.Global()
 	out := make([]eventOut, 0, len(evs))
 	for _, e := range evs {
-		if hideWL && e.ClientIP != "" && s.rules != nil && s.rules.IPWhitelisted(e.ClientIP) {
+		if !paged && !visible(e) {
 			continue
 		}
 		row := eventOut{Event: e}
@@ -364,7 +415,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	writeJSON(w, 200, out)
+	if paged {
+		writeJSON(w, 200, map[string]any{"items": out, "next_cursor": next})
+	} else {
+		writeJSON(w, 200, out)
+	}
 }
 
 // apiEventsPurge 清空请求事件 + 异常事件。
@@ -379,11 +434,11 @@ func (s *Server) apiEventsPurge(w http.ResponseWriter, r *http.Request) {
 		Tenant string `json:"tenant"`
 		All    bool   `json:"all"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	tenant := body.Tenant
-	if body.All {
-		tenant = "" // 显式全清
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.Tenant == "") != body.All {
+		writeJSON(w, 400, map[string]any{"error": "请选择指定机场，或显式确认清空全部"})
+		return
 	}
+	tenant := body.Tenant
 	evN, inN, err := s.st.PurgeEvents(r.Context(), tenant)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
@@ -391,7 +446,7 @@ func (s *Server) apiEventsPurge(w http.ResponseWriter, r *http.Request) {
 	}
 	// 清日志的同时,把 detector 滑窗状态也归零。
 	// 全清(tenant=="")才清滑窗——单租户清不影响其他租户的风控累计。
-	if tenant == "" {
+	if tenant == "" && s.det != nil {
 		s.det.ResetAll()
 	}
 	writeJSON(w, 200, map[string]any{
@@ -435,7 +490,7 @@ func (s *Server) apiResolvedAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "token is empty"})
 		return
 	}
-	if err := s.st.AddResolvedToken(r.Context(), body.Token, body.Tenant, body.Note); err != nil {
+	if err := s.st.AddResolvedToken(r.Context(), s.hasher.Lookup(body.Token), body.Tenant, body.Note); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
@@ -455,7 +510,7 @@ func (s *Server) apiResolvedRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.st.RemoveResolvedToken(r.Context(), body.Token); err != nil {
+	if err := s.st.RemoveResolvedToken(r.Context(), s.hasher.Lookup(body.Token)); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
@@ -488,11 +543,11 @@ func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {
 		Tenant:    q.Get("tenant"),
 		Severity:  q.Get("severity"),
 		IP:        q.Get("ip"),
-		TokenHash: q.Get("token"),
+		TokenHash: s.hasher.Lookup(q.Get("token")),
 		Action:    q.Get("action"),
 		Tag:       q.Get("tag"),
 		Keyword:   q.Get("keyword"),
-		Since:     time.Now().Add(-dur),
+		Since:     s.statsSince(dur),
 		Limit:     limit,
 		Offset:    offset,
 	}
@@ -519,13 +574,16 @@ func (s *Server) apiIncidentsAggIP(w http.ResponseWriter, r *http.Request) {
 		Action:   q.Get("action"),
 		Tag:      q.Get("tag"),
 		Keyword:  q.Get("keyword"),
-		Since:    time.Now().Add(-dur),
+		Since:    s.statsSince(dur),
 		Limit:    limit,
 	}
 	out, err := s.st.AggIncidentsByIP(r.Context(), f)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
+	}
+	if out == nil {
+		out = []store.IncidentIPAgg{}
 	}
 	writeJSON(w, 200, out)
 }
@@ -665,65 +723,55 @@ func (s *Server) apiTenantSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "机场名、订阅路径、上游地址都必填"})
 		return
 	}
-	if !strings.HasPrefix(body.SubscribePath, "/") {
-		writeJSON(w, 400, map[string]any{"error": "订阅路径必须以 / 开头"})
+	if !strings.HasPrefix(body.SubscribePath, "/") || strings.ContainsAny(body.SubscribePath, "?# \t\r\n") {
+		writeJSON(w, 400, map[string]any{"error": "订阅路径必须以 / 开头，不能包含空白、查询或片段"})
 		return
 	}
-	if body.UpstreamPath != "" && !strings.HasPrefix(body.UpstreamPath, "/") {
-		writeJSON(w, 400, map[string]any{"error": "上游路径必须以 / 开头"})
+	if body.UpstreamPath != "" && (!strings.HasPrefix(body.UpstreamPath, "/") || strings.ContainsAny(body.UpstreamPath, "?# \t\r\n")) {
+		writeJSON(w, 400, map[string]any{"error": "上游路径必须以 / 开头，不能包含空白、查询或片段"})
 		return
 	}
-	if _, err := url.Parse(body.Upstream); err != nil {
-		writeJSON(w, 400, map[string]any{"error": "上游地址格式错误: " + err.Error()})
+	u, err := url.Parse(body.Upstream)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		writeJSON(w, 400, map[string]any{"error": "上游地址必须为有效的 HTTP(S) URL，不含账号、查询或片段"})
 		return
 	}
 	enabled := true
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	// 订阅路径全局唯一性校验:扫现有 DB,排除被改的那条
-	rows, err := s.st.ListTenants()
-	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": err.Error()})
-		return
-	}
-	pathKey := strings.TrimRight(body.SubscribePath, "/")
-	excludeName := body.Name
-	if body.OriginalName != "" {
-		excludeName = body.OriginalName
-	}
-	for _, t := range rows {
-		if t.Name == excludeName {
-			continue
-		}
-		if strings.TrimRight(t.SubscribePath, "/") == pathKey {
-			writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("订阅路径 已被机场 %s 占用", t.Name)})
-			return
-		}
-	}
-	// 改名:先删旧
-	if body.OriginalName != "" && body.OriginalName != body.Name {
-		if err := s.st.DeleteTenant(body.OriginalName); err != nil {
-			writeJSON(w, 500, map[string]any{"error": "删除旧机场失败: " + err.Error()})
-			return
-		}
-	}
-	if err := s.st.UpsertTenant(store.TenantRow{
-		Name:          body.Name,
-		Host:          "", // host 字段已废弃,DB 列保留写空
-		SubscribePath: body.SubscribePath,
-		Upstream:      body.Upstream,
-		UpstreamPath:  body.UpstreamPath,
-		Enabled:       enabled,
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	if err := s.st.SaveTenant(strings.TrimSpace(body.OriginalName), store.TenantRow{
+		Name: body.Name, SubscribePath: body.SubscribePath, Upstream: body.Upstream,
+		UpstreamPath: body.UpstreamPath, Enabled: enabled,
 	}); err != nil {
-		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		writePolicyError(w, err)
 		return
 	}
 	if err := s.reloadGatewayTenants(); err != nil {
-		writeJSON(w, 500, map[string]any{"error": "热生效失败: " + err.Error()})
+		writeJSON(w, 500, map[string]any{"error": "已保存，但网关刷新失败: " + err.Error()})
 		return
 	}
+	if body.OriginalName != "" && body.OriginalName != body.Name && s.gw != nil {
+		if err := s.reloadDisplayRules(); err != nil {
+			writeJSON(w, 500, map[string]any{"error": "已保存，但展示规则刷新失败"})
+			return
+		}
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func writePolicyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrRecordNotFound) {
+		writeJSON(w, 404, map[string]any{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, store.ErrNameConflict) || errors.Is(err, store.ErrTenantPathConflict) {
+		writeJSON(w, 409, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 500, map[string]any{"error": "数据库保存失败，未提交修改"})
 }
 
 func (s *Server) apiTenantRemove(w http.ResponseWriter, r *http.Request) {
@@ -742,6 +790,8 @@ func (s *Server) apiTenantRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "name is required"})
 		return
 	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
 	if err := s.st.DeleteTenant(body.Name); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -772,22 +822,6 @@ func (s *Server) reloadGatewayTenants() error {
 		})
 	}
 	return s.gw.Reload(out)
-}
-
-func (s *Server) apiConfig(w http.ResponseWriter, r *http.Request) {
-	// 只回显非敏感字段
-	out := map[string]any{
-		"listen":       s.cfg.Listen,
-		"admin_listen": s.cfg.AdminListen,
-		"detector": map[string]any{
-			"observe_only": s.cfg.Detector.ObserveOnly,
-			"rules":        s.cfg.Detector.Rules,
-			"whitelist":    s.cfg.Detector.Whitelist,
-		},
-		// actions 已废弃,不再下发到前端
-		"faker": s.cfg.Faker,
-	}
-	writeJSON(w, 200, out)
 }
 
 // -------- IP 白名单 --------
@@ -837,7 +871,7 @@ func (s *Server) apiIPWhitelistRemove(w http.ResponseWriter, r *http.Request) {
 
 // apiDetectorResetToken POST body:{token} 清掉该 token 在 detector 滑窗里的累计计数
 // + 它触达过的所有 IP 的 ipFreq / ipTokenSet,等于"把这次拉黑的因素全清"。
-// 不是免疫:下次再触发规则,继续按正常流程投毒。
+// 不是免疫：下次触发规则仍会被拒绝。
 func (s *Server) apiDetectorResetToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeJSON(w, 405, map[string]any{"error": "POST only"})
@@ -854,7 +888,7 @@ func (s *Server) apiDetectorResetToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "token required"})
 		return
 	}
-	s.det.ResetToken(body.Token)
+	s.det.ResetToken(s.hasher.Lookup(body.Token))
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

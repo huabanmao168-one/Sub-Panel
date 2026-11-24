@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -50,14 +51,21 @@ func (r *DisplayRule) Validate() error {
 	default:
 		return errors.New("匹配方式非法")
 	}
-	if r.AirportTo == "" && r.Replacements == "" {
-		return errors.New("至少配置一项:新机场名或关键词替换")
+	var reps []struct {
+		From string `json:"from"`
 	}
 	if r.Replacements != "" {
-		var reps []map[string]any
 		if err := json.Unmarshal([]byte(r.Replacements), &reps); err != nil {
 			return errors.New("关键词替换格式错误")
 		}
+	}
+	for _, rep := range reps {
+		if strings.TrimSpace(rep.From) == "" {
+			return errors.New("关键词替换的旧词不能为空")
+		}
+	}
+	if r.AirportTo == "" && len(reps) == 0 {
+		return errors.New("至少填写新机场名或一条关键词替换")
 	}
 	// 作用范围固定为全改(节点名、分组名与引用、文件名与标题)
 	r.ScopeNode, r.ScopeGroup, r.ScopeHeader = true, true, true

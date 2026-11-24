@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/store"
@@ -27,7 +28,7 @@ import (
 type detectRuleAPI struct {
 	Name string `json:"name"`
 	Desc string `json:"desc"`
-	// Severity 已废弃,API 不再返回也不再接收;命中规则统一投毒。
+	// Severity 已废弃,API 不再返回也不再接收;命中规则统一拒绝请求。
 	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order"`
 
@@ -105,11 +106,11 @@ func apiToWhen(a *detectRuleAPI) (config.When, error) {
 		if winSec == 0 && gte == 0 {
 			return nil, nil
 		}
-		if winSec <= 0 || gte <= 0 {
-			return nil, fmt.Errorf("%s: 窗口和阈值必须同时大于 0", name)
+		if winSec <= 0 || gte <= 0 || int64(winSec) > int64(365*24*time.Hour/time.Second) {
+			return nil, fmt.Errorf("%s: 窗口和阈值必须同时大于 0，窗口最长 365 天", name)
 		}
 		return &config.Cond{
-			Window: config.Duration(secToNs(winSec)),
+			Window: config.Duration(time.Duration(winSec) * time.Second),
 			GTE:    gte,
 		}, nil
 	}
@@ -134,8 +135,6 @@ func apiToWhen(a *detectRuleAPI) (config.When, error) {
 	}
 	return w, nil
 }
-
-func secToNs(s int) int64 { return int64(s) * 1_000_000_000 }
 
 func trimList(in []string) []string {
 	if len(in) == 0 {
@@ -195,19 +194,18 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
+	if s.det != nil && when.MaxWindow() > s.det.MaxWindow() {
+		writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("规则窗口超过当前容量 %s，未保存修改", s.det.MaxWindow())})
+		return
+	}
 	buf, err := json.Marshal(when)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": "序列化条件失败: " + err.Error()})
 		return
 	}
-	// 改名:先删旧
-	if body.OriginalName != "" && body.OriginalName != body.Name {
-		if err := s.st.DeleteDetectRule(body.OriginalName); err != nil {
-			writeJSON(w, 500, map[string]any{"error": "删除旧规则失败: " + err.Error()})
-			return
-		}
-	}
-	if err := s.st.UpsertDetectRule(store.DetectRuleRow{
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	if err := s.st.SaveDetectRule(strings.TrimSpace(body.OriginalName), store.DetectRuleRow{
 		Name:      body.Name,
 		Desc:      body.Desc,
 		Severity:  "", // 已废弃,DB 列保留兼容
@@ -215,7 +213,7 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		Enabled:   body.Enabled,
 		SortOrder: body.SortOrder,
 	}); err != nil {
-		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		writePolicyError(w, err)
 		return
 	}
 	if err := s.reloadDetectRules(); err != nil {
@@ -241,6 +239,8 @@ func (s *Server) apiDetectRuleRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "name 必填"})
 		return
 	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
 	if err := s.st.DeleteDetectRule(body.Name); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -254,6 +254,9 @@ func (s *Server) apiDetectRuleRemove(w http.ResponseWriter, r *http.Request) {
 
 // reloadDetectRules 从 DB 读启用的规则,推到 detector 热生效。
 func (s *Server) reloadDetectRules() error {
+	if s.det == nil {
+		return nil
+	}
 	rows, err := s.st.ListDetectRules()
 	if err != nil {
 		return err

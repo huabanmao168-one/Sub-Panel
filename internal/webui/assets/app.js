@@ -24,17 +24,16 @@ function escapeHTML(s) {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
 }
-function tokenShort(h) {
-  // 用户要求所有页面直接显示 token 原文,不截断。
-  // 保留函数名避免到处改调用点;CSS 用 word-break:break-all 处理长字符串。
-  return h || '';
+function tokenShort(id) {
+  const value = String(id || '');
+  return value.length > 26 ? value.slice(0, 18) + '…' + value.slice(-6) : value;
 }
 const ACTION_CN = {
   pass: '放行',
-  fake: '投毒',
   deny: '拒绝',
-  block_path: '路径拦截',
-  fake_failed: '投毒失败',
+  lumi_failed: 'Lumi 订阅处理失败',
+  display: '展示改写',
+  display_failed: '展示处理失败',
 };
 function actionLabel(a) { return ACTION_CN[a] || a || '-'; }
 
@@ -50,7 +49,11 @@ const TAG_PREFIX_CN = {
   // 白名单 / 路径
   'ip_whitelist':   '白名单放行',
   'banlist_ip':     'IP 黑名单',
-  'path_not_match': '路径不匹配',
+  'passthrough_all': '全局跳过风控',
+  'lumi_encrypt': 'Lumi 兼容处理',
+  'encrypt_failed': 'Lumi 加密失败',
+  'decode_failed': '订阅解压失败',
+  'body_too_large': '订阅正文过大',
   // 上游
   'upstream_bad':   '上游异常',
   // 触发规则
@@ -103,30 +106,46 @@ function tagLabel(t) {
   }
   return TAG_PREFIX_CN[t] || t;
 }
-// 等级常量已废弃:命中即投毒,无等级。
 
+let toastTimer;
 function toast(msg, kind = '') {
   const t = $('#toast');
   t.textContent = msg;
   t.className = 'toast show ' + kind;
-  setTimeout(() => t.className = 'toast ' + kind, 3000);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.className = 'toast ' + kind, 3000);
 }
 
-async function api(path) {
-  const r = await fetch(path);
-  if (r.status === 401) { location.href = '/login'; return null; }
-  if (!r.ok) { toast('API ' + r.status, 'error'); return null; }
-  return r.json();
+let inflightRequests = 0;
+let progressTimer;
+async function requestJSON(path, method = 'GET', body, headers = {}) {
+  const bar = $('#progressBar');
+  clearTimeout(progressTimer);
+  if (++inflightRequests === 1) bar.className = 'progress-bar loading';
+  try {
+    const options = method === 'GET' ? { headers } : {
+      method, headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body || {}),
+    };
+    const r = await fetch(path, options);
+    if (r.status === 401) { location.href = '/login'; return null; }
+    const data = await r.json().catch(() => null);
+    if (!r.ok) return { ...data, ok: false, error: data?.error || data?.msg || '请求失败（' + r.status + '）' };
+    return data ?? { ok: false, error: '服务器返回了无效数据' };
+  } catch {
+    return { ok: false, error: '无法连接管理服务，请检查网络后重试' };
+  } finally {
+    if (--inflightRequests === 0) {
+      bar.className = 'progress-bar done';
+      progressTimer = setTimeout(() => { bar.className = 'progress-bar'; }, 500);
+    }
+  }
 }
-async function apiPost(path, body) {
-  const r = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  if (r.status === 401) { location.href = '/login'; return null; }
-  return r.json();
+async function api(path, headers) {
+  const data = await requestJSON(path, 'GET', undefined, headers);
+  if (data?.ok === false) { toast(data.error, 'error'); return null; }
+  return data;
 }
+function apiPost(path, body) { return requestJSON(path, 'POST', body); }
 
 // ---- 路由 ----
 
@@ -136,11 +155,28 @@ const TAB_TITLES = {
   'resolved': '已处理 Token',
   'ip-bans': '黑名单',
   'ip-whitelist': 'IP 白名单',
+  'ua-blacklist': 'UA 黑名单',
+  'detect-rules': '触发规则',
   'cloud-ip': 'GeoIP 库',
   'suspects': '嫌疑用户',
   'tenants': '机场管理',
   'display-rules': '订阅展示',
   'settings': '设置',
+};
+
+const TAB_DESCRIPTIONS = {
+  dashboard: '仅统计经可信前置 Nginx 转发的有效订阅路由请求。',
+  events: '筛选订阅请求，核查命中规则或异常访问。',
+  resolved: '查看已处理的订阅，并按需恢复到请求日志。',
+  'ip-bans': '维护封禁 IP 与全局拦截规则。',
+  'ip-whitelist': '允许指定 IP 或网段跳过风控。',
+  'ua-blacklist': '管理需要拦截的客户端标识。',
+  'display-rules': '按机场和匹配条件定制订阅的显示名称。',
+  'cloud-ip': '检查地理库状态，查询 IP 的位置和用途。',
+  'detect-rules': '设置请求频次、IP 分布与地理匹配条件。',
+  suspects: '结合上报数据与订阅请求，核查异常用户。',
+  tenants: '配置订阅入口、上游地址与上报接入。',
+  settings: '管理系统配置、管理员密码与应急开关。',
 };
 
 const TAB_LOADERS = {
@@ -155,85 +191,116 @@ const TAB_LOADERS = {
   'detect-rules': () => loadRulesTable(),
   'suspects': () => loadSuspects(),
   'tenants': () => loadTenantsTable(),
-  'settings': () => { loadSettings(); loadPassthrough(); loadReportSecret(); },
+  'settings': () => Promise.all([loadSettings(), loadPassthrough(), loadReportSecret()]),
 };
 
+const tenantFilterTabs = new Set(['dashboard', 'events', 'resolved', 'suspects']);
+const windowFilterTabs = new Set(['dashboard', 'events']);
+function updateTopbar(tab) {
+  $('#tenantSel').hidden = !tenantFilterTabs.has(tab);
+  $('#windowSel').hidden = !windowFilterTabs.has(tab);
+}
+function setMenuOpen(open) {
+  $('#sidebar').classList.toggle('menu-open', open);
+  $('#navToggle').setAttribute('aria-expanded', String(open));
+}
+let activeTab;
+function currentTab() {
+  const tab = location.hash.slice(1);
+  return Object.hasOwn(TAB_LOADERS, tab) ? tab : 'dashboard';
+}
+function activateTab(tab) {
+  if (activeTab === tab) return;
+  closeActiveDialog();
+  activeTab = tab;
+  for (const a of $$('.navlink')) {
+    const active = a.dataset.tab === tab;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  }
+  $$('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
+  $('#pageTitle').textContent = TAB_TITLES[tab];
+  $('#pageDescription').textContent = TAB_DESCRIPTIONS[tab];
+  document.title = `${TAB_TITLES[tab]} · Sub-Panel`;
+  updateTopbar(tab);
+  window.scrollTo(0, 0);
+  TAB_LOADERS[tab]();
+}
+$('#navToggle').addEventListener('click', () => {
+  const open = !$('#sidebar').classList.contains('menu-open');
+  setMenuOpen(open);
+  if (open) $('.navlink.active')?.focus();
+});
 $$('.navlink').forEach(a => {
+  a.href = '#' + a.dataset.tab;
   a.addEventListener('click', e => {
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    $$('.navlink').forEach(x => x.classList.remove('active'));
-    a.classList.add('active');
-    const tab = a.dataset.tab;
-    $$('.tab').forEach(s => s.classList.remove('active'));
-    const sec = document.getElementById('tab-' + tab);
-    if (sec) sec.classList.add('active');
-    $('#pageTitle').textContent = TAB_TITLES[tab] || tab;
-    if (TAB_LOADERS[tab]) TAB_LOADERS[tab]();
+    if ($('#sidebar').classList.contains('menu-open')) {
+      setMenuOpen(false);
+      $('#navToggle').focus();
+    }
+    if (location.hash !== a.hash) history.pushState(null, '', a.hash);
+    activateTab(a.dataset.tab);
   });
 });
-
-$('#refreshBtn').addEventListener('click', () => {
-  const active = document.querySelector('.navlink.active');
-  if (active && TAB_LOADERS[active.dataset.tab]) TAB_LOADERS[active.dataset.tab]();
+window.addEventListener('hashchange', () => activateTab(currentTab()));
+$('.skip-link').addEventListener('click', e => {
+  e.preventDefault();
+  $('#main-content').focus();
 });
 
+$('#refreshBtn').addEventListener('click', e => withLoading(e.currentTarget, () => TAB_LOADERS[activeTab || 'dashboard']()));
+
 $('#logoutBtn').addEventListener('click', async () => {
-  await apiPost('/api/logout', {});
-  location.href = '/login';
+  const r = await apiPost('/api/logout', {});
+  if (r?.ok) location.href = '/login';
+  else if (r) toast(r.error || '退出失败', 'error');
 });
 
 $('#tenantSel').addEventListener('change', e => {
   state.tenant = e.target.value;
-  const active = document.querySelector('.navlink.active');
-  if (active && TAB_LOADERS[active.dataset.tab]) TAB_LOADERS[active.dataset.tab]();
+  TAB_LOADERS[activeTab || 'dashboard']();
 });
 
 $('#windowSel').addEventListener('change', e => {
   state.window = e.target.value;
-  const active = document.querySelector('.navlink.active');
-  if (active && TAB_LOADERS[active.dataset.tab]) TAB_LOADERS[active.dataset.tab]();
+  TAB_LOADERS[activeTab || 'dashboard']();
 });
 
 // ---- tenants ----
 async function loadTenants() {
   const ts = await api('/api/tenants');
   if (!ts) return;
-  const sel = $('#tenantSel');
-  sel.innerHTML = '<option value="">全部机场</option>';
-  for (const t of ts) {
-    const o = document.createElement('option');
-    o.value = t.name;
-    o.textContent = t.name + ' (' + (t.subscribe_path || '') + ')';
-    sel.appendChild(o);
-  }
+  refreshTenantSelector(ts);
 }
 
 // ---- dashboard ----
+let summaryRequest = 0;
 async function loadSummary() {
+  const request = ++summaryRequest;
   const q = new URLSearchParams({ tenant: state.tenant, window: state.window });
   const s = await api('/api/summary?' + q);
-  if (!s) return;
+  if (request !== summaryRequest || !s) return;
   const cards = $('#summaryCards');
   cards.innerHTML = '';
   const data = [
     ['total', '总请求', s.total_events],
     ['pass', '放行', s.pass],
-    ['fake', '投毒', s.fake],
-    ['deny', '拒绝', s.deny],
+    ['deny', '拒绝或失败', s.deny],
     ['', '独立 IP', s.unique_ips],
-    ['', '独立 订阅', s.unique_tokens],
+    ['', '独立订阅', s.unique_tokens],
   ];
   for (const [cls, label, val] of data) {
     const c = document.createElement('div');
     c.className = 'stat-card ' + cls;
-    c.innerHTML = `<div class="label">${cls ? '<span class="dot"></span>' : ''}${label}</div><div class="value">${val ?? 0}</div>`;
+    c.innerHTML = `<div class="label">${cls ? '<span class="dot"></span>' : ''}${label}</div><div class="value">${Number(val ?? 0).toLocaleString('zh-CN')}</div>`;
     cards.appendChild(c);
   }
-  // 异常等级已废弃,命中即投毒,无等级统计。
   const ipTbody = $('#topIPs tbody'); ipTbody.innerHTML = '';
   (s.top_ips || []).forEach(k => {
     const tr = document.createElement('tr');
-    const region = k.region || '<span class="muted">未知</span>';
     const isp = k.isp ? escapeHTML(k.isp) : '<span class="muted">未知</span>';
     tr.innerHTML = `<td class="mono">${escapeHTML(k.key)}</td><td>${k.region ? escapeHTML(k.region) : '<span class="muted">未知</span>'}</td><td>${isp}</td><td style="text-align:right" class="mono">${k.count}</td>`;
     ipTbody.appendChild(tr);
@@ -244,12 +311,14 @@ async function loadSummary() {
     tr.innerHTML = `<td class="mono copyable ev-token-expand" data-copy="${escapeHTML(k.key)}" data-full="${escapeHTML(k.key)}" data-short="${escapeHTML(tokenShort(k.key))}" title="点击展开 / 再点复制">${escapeHTML(tokenShort(k.key))}</td><td style="text-align:right" class="mono">${k.count}</td>`;
     tokTbody.appendChild(tr);
   });
+  if (!ipTbody.children.length) setEmptyRow(ipTbody, '当前范围内没有 IP 记录');
+  if (!tokTbody.children.length) setEmptyRow(tokTbody, '当前范围内没有订阅记录');
   bindCopyHandlers(tokTbody);
 }
 
 // ---- events ----
 const EV_PAGE_SIZE = 50;
-let evOffset = 0;
+let evPage = { query: null, cursor: '', count: 0, loading: false };
 
 function renderEventCard(e) {
   const card = document.createElement('div');
@@ -272,9 +341,8 @@ function renderEventCard(e) {
     ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="标记此 token 为已处理,后续不再出现">已处理</button>`
     : '';
   // 重置滑窗按钮:把此 token 在风控滑窗里的累计计数清掉,把它"拉出来"。
-  // 不是免疫——下次再命中规则照样投毒。仅对 fake / fake_failed 事件显示。
-  const resetBtn = (tokenFull && (e.Action === 'fake' || e.Action === 'fake_failed'))
-    ? `<button class="ev-reset" data-token="${escapeHTML(tokenFull)}" title="清掉此 token 的风控累计窗口,等于'本次解毒'。下次命中规则仍会重新投毒">重置窗口</button>`
+  const resetBtn = (tokenFull && e.Action === 'deny')
+    ? `<button class="ev-reset" data-token="${escapeHTML(tokenFull)}" title="清除该订阅的频率累计，不解除名单或规则限制">重置窗口</button>`
     : '';
   card.innerHTML = `
     <div class="ev-card-head">
@@ -360,49 +428,63 @@ function bindCopyHandlers(scope) {
 }
 
 async function loadEvents(append = false) {
-  if (!append) evOffset = 0;
-  const q = new URLSearchParams({
-    tenant: state.tenant, window: state.window,
-    limit: String(EV_PAGE_SIZE), offset: String(evOffset),
-    ip: $('#evIP').value, token: $('#evToken').value, action: $('#evAction').value,
-    usage: $('#evUsage').value, ua: $('#evUA').value,
-    show_whitelist: $('#evShowWL').checked ? '1' : '0',
-  });
-  const evs = await api('/api/events?' + q);
-  if (!evs) return;
+  if (append && (!evPage.cursor || evPage.loading)) return;
   const list = $('#evList');
-  if (!append) list.innerHTML = '';
-  if (!append && evs.length === 0) {
-    list.innerHTML = '<div class="empty-state">没有匹配的事件</div>';
-    updateEvMore(0);
-  } else {
-    for (const e of evs) list.appendChild(renderEventCard(e));
-    bindCopyHandlers(list);
-    evOffset += evs.length;
-    updateEvMore(evs.length);
+  if (!append) {
+    evPage = { cursor: '', count: 0, loading: false, query: new URLSearchParams({
+      page: 'cursor', tenant: state.tenant, window: state.window, limit: String(EV_PAGE_SIZE),
+      ip: $('#evIP').value.trim(), token: $('#evToken').value.trim(), action: $('#evAction').value,
+      usage: $('#evUsage').value, ua: $('#evUA').value.trim(),
+      show_whitelist: $('#evShowWL').checked ? '1' : '0',
+    }) };
+    setEventEmpty('正在查询请求日志…');
+    loadEvTopIP(evPage);
   }
-  if (!append) loadEvTopIP();  // 顶部 Top 20 跟 events 同步刷新
+  const page = evPage;
+  const q = new URLSearchParams(page.query);
+  if (append) q.set('cursor', page.cursor);
+  page.loading = true;
+  updateEvMore();
+  list.setAttribute('aria-busy', 'true');
+  const tokenFilter = q.get('token');
+  q.delete('token');
+  const result = await api('/api/events?' + q, tokenFilter ? { 'X-Subscription-Lookup': encodeURIComponent(tokenFilter) } : {});
+  if (page !== evPage) return;
+  page.loading = false;
+  list.setAttribute('aria-busy', 'false');
+  if (!result) {
+    if (!append) setEventEmpty('查询失败，请重试。');
+    updateEvMore();
+    return;
+  }
+  if (page.count === 0) list.replaceChildren();
+  const keywords = [q.get('ip'), tokenFilter].filter(Boolean);
+  for (const event of result.items) {
+    const card = renderEventCard(event);
+    highlightTerms(card, keywords);
+    bindCopyHandlers(card);
+    list.append(card);
+  }
+  page.count += result.items.length;
+  page.cursor = result.next_cursor;
+  if (!page.count) setEventEmpty(page.cursor ? '这批日志没有可见记录，可继续加载。' : '没有匹配的请求日志。');
+  updateEvMore();
 }
 
-function updateEvMore(lastCount) {
-  let btn = $('#evMoreBtn');
-  if (!btn) {
-    const list = $('#evList');
-    if (!list || !list.parentNode) return;
-    btn = document.createElement('button');
-    btn.id = 'evMoreBtn';
-    btn.className = 'ev-more-btn';
-    btn.addEventListener('click', () => loadEvents(true));
-    list.parentNode.insertBefore(btn, list.nextSibling);
-  }
-  if (lastCount < EV_PAGE_SIZE) {
-    btn.style.display = 'none';
-  } else {
-    btn.style.display = '';
-    btn.textContent = `加载更多(已显示 ${evOffset} 条)`;
-  }
+function setEventEmpty(message) {
+  const row = document.createElement('div');
+  row.className = 'empty-state';
+  row.textContent = message;
+  $('#evList').replaceChildren(row);
 }
-$('#evQuery').addEventListener('click', () => loadEvents(false));
+function updateEvMore() {
+  const btn = $('#evMoreBtn');
+  btn.hidden = !evPage.cursor;
+  btn.disabled = evPage.loading;
+  btn.textContent = evPage.loading ? '正在加载…' : `加载更多 · 已显示 ${evPage.count} 条`;
+}
+$('#evMoreBtn').addEventListener('click', () => loadEvents(true));
+$('#evQuery').addEventListener('click', e => withLoading(e.currentTarget, () => loadEvents()));
 
 // 清空日志:针对当前选中的机场;选"全部机场"时清全部。
 // 二次确认 + 显示删了多少行。
@@ -413,11 +495,10 @@ $('#evPurge').addEventListener('click', async () => {
   const body = t ? { tenant: t } : { all: true };
   const r = await apiPost('/api/events/purge', body);
   if (r && r.ok) {
-    alert(`已清空。请求事件 ${r.events_deleted} 条,异常事件 ${r.incidents_deleted} 条。`);
+    toast(`已清空 ${r.events_deleted} 条请求、${r.incidents_deleted} 条异常记录。`, 'success');
     loadEvents();
-    if (typeof loadSummary === 'function') loadSummary();
-  } else {
-    alert('清空失败:' + (r && r.error ? r.error : '未知错误'));
+  } else if (r) {
+    toast(r.error || '清空失败', 'error');
   }
 });
 
@@ -427,7 +508,7 @@ $('#evList').addEventListener('click', async (e) => {
   if (resetBtn) {
     const token = resetBtn.dataset.token || '';
     if (!token) return;
-    if (!confirm(`重置此 token 在风控滑窗里的累计?\n\n${token}\n\n本次会被"拉出来",但下次再触发规则仍会照常投毒。`)) return;
+    if (!confirm('清除该订阅的频率累计？这不会解除黑名单，也不影响之后重新命中的规则。')) return;
     const r = await apiPost('/api/detector/reset-token', { token });
     if (r && r.ok) {
       toast('已重置滑窗,客户端刷一下订阅试试', 'success');
@@ -452,17 +533,16 @@ $('#evList').addEventListener('click', async (e) => {
 });
 
 // ---- 已处理 Token 列表 ----
+let resolvedRequest = 0;
 async function loadResolved() {
+  const request = ++resolvedRequest;
   const q = new URLSearchParams();
   if (state.tenant) q.set('tenant', state.tenant);
   const rows = await api('/api/resolved' + (q.toString() ? '?' + q : ''));
+  if (request !== resolvedRequest || !rows) return;
   const tbody = $('#resolvedTbody');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-  if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">无已处理 token</td></tr>';
-    return;
-  }
+  tbody.replaceChildren();
+  if (!rows.length) { setEmptyRow(tbody, '没有已处理的订阅'); return; }
   for (const r of rows) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -493,18 +573,17 @@ $('#resolvedClearAll')?.addEventListener('click', async () => {
 });
 
 // ---- 请求日志页顶部:异常 IP Top 20(复用 /api/incidents/agg_ip) ----
-async function loadEvTopIP() {
+async function loadEvTopIP(page) {
   const q = new URLSearchParams({
-    tenant: state.tenant, window: state.window, limit: '20',
-    action: $('#evAction').value,
+    tenant: page.query.get('tenant'), window: page.query.get('window'), limit: '20',
+    action: page.query.get('action'),
   });
+  const tbody = $('#evTopIPTbody');
+  setEmptyRow(tbody, '正在统计异常 IP…');
   const aggs = await api('/api/incidents/agg_ip?' + q);
-  const tbody = $('#evTopIPTbody'); if (!tbody) return;
-  tbody.innerHTML = '';
-  if (!aggs || !aggs.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">本时间窗内无异常 IP</td></tr>';
-    return;
-  }
+  if (page !== evPage) return;
+  tbody.replaceChildren();
+  if (!aggs?.length) { setEmptyRow(tbody, aggs ? '当前范围内没有异常 IP' : '统计加载失败'); return; }
   for (const a of aggs) {
     const tr = document.createElement('tr');
     const actsHTML = (a.actions || [])
@@ -542,8 +621,7 @@ async function loadEvTopIP() {
 
 // ---- bans (仅 IP,token 黑名单已废弃) ----
 async function loadBans() {
-  await loadBlacklistCfg();
-  const bs = await api('/api/bans');
+  const [, bs] = await Promise.all([loadBlacklistCfg(), api('/api/bans')]);
   if (!bs) return;
   const ipTbody = $('#ipBanTbody'); ipTbody.innerHTML = '';
   let ipCount = 0;
@@ -562,7 +640,7 @@ async function loadBans() {
     `;
     ipTbody.appendChild(tr); ipCount++;
   }
-  if (!ipCount) ipTbody.innerHTML = '<tr><td colspan="7" class="empty-state">无封禁 IP</td></tr>';
+  if (!ipCount) setEmptyRow(ipTbody, '当前没有封禁的 IP');
   $$('#ipBanTbody button.danger').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('解封 ' + btn.dataset.target + ' ?')) return;
@@ -591,6 +669,8 @@ $('#banIPAddBtn').addEventListener('click', async () => {
 
 // ---- 全局黑名单配置(海外/云/ISP/浏览器)----
 async function loadBlacklistCfg() {
+  const btn = $('#blSaveBtn');
+  btn.disabled = true;
   const cfg = await api('/api/blacklist');
   if (!cfg) return;
   $('#blOversea').checked = !!cfg.oversea_enabled;
@@ -598,6 +678,7 @@ async function loadBlacklistCfg() {
   $('#blCNIDC').checked = !!cfg.cn_idc_enabled;
   $('#blBrowser').checked = !!cfg.browser_enabled;
   $('#blISPKw').value = (cfg.isp_keywords || []).join(', ');
+  btn.disabled = false;
 }
 $('#blSaveBtn').addEventListener('click', async () => {
   const kw = $('#blISPKw').value.split(',').map(s => s.trim()).filter(Boolean);
@@ -614,12 +695,10 @@ $('#blSaveBtn').addEventListener('click', async () => {
 
 // ---- IP 白名单 ----
 async function loadIPWhitelist() {
-  const list = await api('/api/ip-whitelist') || [];
-  const tbody = $('#ipWLTbody'); tbody.innerHTML = '';
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">还没有白名单条目</td></tr>';
-    return;
-  }
+  const list = await api('/api/ip-whitelist');
+  if (!list) return;
+  const tbody = $('#ipWLTbody'); tbody.replaceChildren();
+  if (!list.length) { setEmptyRow(tbody, '暂无 IP 白名单条目'); return; }
   for (const e of list) {
     const tr = document.createElement('tr');
     tr.dataset.id = e.ID;
@@ -692,12 +771,10 @@ $('#ipWLAddBtn').addEventListener('click', async () => {
 
 // ---- UA 黑名单 ----
 async function loadUABlacklist() {
-  const list = await api('/api/ua-blacklist') || [];
-  const tbody = $('#uaBlTbody'); tbody.innerHTML = '';
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">还没有 UA 黑名单</td></tr>';
-    return;
-  }
+  const list = await api('/api/ua-blacklist');
+  if (!list) return;
+  const tbody = $('#uaBlTbody'); tbody.replaceChildren();
+  if (!list.length) { setEmptyRow(tbody, '暂无 UA 黑名单条目'); return; }
   for (const e of list) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -786,41 +863,82 @@ $('#cloudCheckIP').addEventListener('keydown', e => {
   if (e.key === 'Enter') $('#cloudCheckBtn').click();
 });
 
-// ---- 设置 ----
-async function loadSettings() {
-  const c = await api('/api/config');
-  if (c) $('#rulesPre').textContent = JSON.stringify({
-    detector: c.detector,
-    actions: c.actions,
-    paths: c.paths,
-    faker: c.faker,
-  }, null, 2);
+// ---- SQLite 系统配置 ----
+const runtimeForm = $('#runtimeSettingsForm');
+const runtimeFields = $('#runtimeFields');
+const runtimeStatus = $('#runtimeStatus');
+let runtimeBusy = false;
+function renderRuntimeSettings(result) {
+  for (const [key, value] of Object.entries(result.saved)) {
+    const field = runtimeForm.elements.namedItem(key);
+    if (!field) continue;
+    if (field.type === 'checkbox') field.checked = value;
+    else field.value = Array.isArray(value) ? value.join('\n') : value;
+  }
+  runtimeStatus.dataset.state = result.restart_required ? 'pending' : 'active';
+  const addresses = ` 当前监听：订阅 ${result.active.listen}，管理 ${result.active.admin_listen}。`;
+  runtimeStatus.textContent = (result.restart_required ? '已保存，等待重启。' : '数据库配置已生效。') + addresses;
 }
+async function loadSettings() {
+  if (runtimeBusy) return;
+  runtimeBusy = true;
+  runtimeFields.disabled = true;
+  runtimeStatus.dataset.state = 'loading';
+  runtimeStatus.textContent = '正在加载配置…';
+  const result = await api('/api/settings/runtime');
+  runtimeBusy = false;
+  if (!result) { runtimeStatus.dataset.state = 'error'; runtimeStatus.textContent = '加载失败，请刷新重试。'; return; }
+  renderRuntimeSettings(result);
+  runtimeFields.disabled = false;
+}
+runtimeForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (runtimeBusy) return;
+  const body = {};
+  for (const field of runtimeForm.elements) {
+    if (!field.name) continue;
+    if (field.type === 'checkbox') body[field.name] = field.checked;
+    else if (field.type === 'number') body[field.name] = Number(field.value);
+    else if (field.tagName === 'TEXTAREA') body[field.name] = field.value.split('\n').map(x => x.trim()).filter(Boolean);
+    else body[field.name] = field.value.trim();
+  }
+  runtimeBusy = true;
+  runtimeFields.disabled = true;
+  const result = await requestJSON('/api/settings/runtime', 'PUT', body);
+  runtimeBusy = false;
+  runtimeFields.disabled = false;
+  if (!result || result.ok === false) { toast(result?.error || '保存失败', 'error'); return; }
+  renderRuntimeSettings(result);
+  toast(result.restart_required ? '已保存，重启后生效' : '已保存', 'success');
+});
 
 // ---- 工具(token hash 工具已删除,v2board 重置就失效) ----
 
 // ---- 启动 ----
 (async function () {
+  api('/api/session').then(session => {
+    if (!session?.username) return;
+    $('#userName').textContent = session.username;
+    $('#userAvatar').textContent = Array.from(session.username)[0].toUpperCase();
+  });
   await loadTenants();
-  loadSummary();
+  if (!activeTab) activateTab(currentTab());
 })();
 
 // ---- 机场管理 ----
 async function loadTenantsTable() {
-  const list = await api('/api/tenants') || [];
+  const list = await api('/api/tenants');
+  if (!list) return;
+  refreshTenantSelector(list);
   const tbody = $('#tenantsTbody'); tbody.innerHTML = '';
   if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">还没配置机场,点右上「+ 新增机场」开始</td></tr>';
+    setEmptyRow(tbody, '暂无机场，可用「新增机场」创建订阅入口。');
     return;
   }
-  // 同步刷新顶栏 tenantSel,保持其他页机场筛选器同步
-  refreshTenantSelector(list);
   for (const t of list) {
     const tr = document.createElement('tr');
     const upPath = t.upstream_path ? escapeHTML(t.upstream_path) : '<span class="muted">(透传)</span>';
-    const statusBadge = t.enabled
-      ? '<span style="color:#10b981;font-weight:600">● 启用</span>'
-      : '<span style="color:#9ca3af">○ 禁用</span>';
+    const statusBadge = t.enabled ? '<span class="pill pass">已启用</span>' : '<span class="pill empty">已停用</span>';
     tr.innerHTML = `
       <td><strong>${escapeHTML(t.name)}</strong></td>
       <td class="mono">${escapeHTML(t.subscribe_path)}</td>
@@ -828,10 +946,12 @@ async function loadTenantsTable() {
       <td class="mono">${upPath}</td>
       <td>${statusBadge}</td>
       <td>
-        <button data-act="edit" data-name="${escapeHTML(t.name)}">编辑</button>
-        <button data-act="report" data-name="${escapeHTML(t.name)}">接入代码</button>
-        <button data-act="toggle" data-name="${escapeHTML(t.name)}">${t.enabled ? '禁用' : '启用'}</button>
-        <button class="danger" data-act="del" data-name="${escapeHTML(t.name)}">删除</button>
+        <div class="table-actions">
+          <button data-act="edit" data-name="${escapeHTML(t.name)}">编辑</button>
+          <button data-act="report" data-name="${escapeHTML(t.name)}">接入代码</button>
+          <button data-act="toggle" data-name="${escapeHTML(t.name)}">${t.enabled ? '停用' : '启用'}</button>
+          <button class="danger" data-act="del" data-name="${escapeHTML(t.name)}">删除</button>
+        </div>
       </td>
     `;
     tbody.appendChild(tr);
@@ -853,6 +973,7 @@ function refreshTenantSelector(list) {
   }
   // 当前选中机场如果还在,保持选中
   if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  state.tenant = sel.value;
 }
 
 async function onTenantAction(act, name, list) {
@@ -896,11 +1017,10 @@ function openTenantModal(t) {
   $('#tenantFormUpPath').value = isEdit ? (t.upstream_path || '') : '';
   $('#tenantFormEnabled').checked = isEdit ? !!t.enabled : true;
   $('#tenantModal').dataset.originalName = isEdit ? t.name : '';
-  $('#tenantModal').style.display = 'flex';
-  setTimeout(() => $('#tenantFormName').focus(), 50);
+  showDialog('tenantModal', '#tenantFormName');
 }
 
-function closeTenantModal() { $('#tenantModal').style.display = 'none'; }
+function closeTenantModal() { closeActiveDialog('tenantModal'); }
 
 $('#tenantAddBtn').addEventListener('click', () => openTenantModal(null));
 $('#tenantModalClose').addEventListener('click', closeTenantModal);
@@ -934,33 +1054,27 @@ $('#tenantFormSave').addEventListener('click', async () => {
 
 // ============ 上报接入代码弹窗 ============
 
-let _reportInfo = null;
-async function getReportInfo() {
-  if (!_reportInfo) _reportInfo = await api('/api/report-info');
-  return _reportInfo || {};
-}
-
 async function openReportCodeModal(tenantName, reportId) {
-  const info = await getReportInfo();
-  // 上报走订阅网关(80端口),用同域名拼 report_id
-  // sub_listen 格式如 ":80" / "0.0.0.0:8080",提取端口
-  const subListen = info.sub_listen || ':80';
-  const subPort = subListen.split(':').pop();
-  const host = location.hostname;
-  const portBit = (subPort === '80' || subPort === '443') ? '' : ':' + subPort;
-  const proto = subPort === '443' ? 'https' : 'http';
-  const reportUrl = `${proto}://${host}${portBit}/r/${reportId}`;
-  const secret = info.report_secret || '(未配置,请在设置页「上报密钥」中配置)';
+  const info = await api('/api/report-info');
+  if (!info) return;
+  if (!reportId) { toast('该机场未分配上报地址，请刷新后重试。', 'error'); return; }
+  const base = info.report_base_url;
+  const guessed = new URL('http://' + location.hostname);
+  guessed.port = (info.sub_listen || ':80').split(':').pop();
+  const reportUrl = `${base || guessed.origin}/r/${encodeURIComponent(reportId)}`;
+  const secret = info.report_secret || '';
+  const phpString = value => String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+  $('#reportURLHint').hidden = Boolean(base);
 
   $('#reportCodeTitle').textContent = `上报接入 — ${tenantName}`;
   $('#reportCodeURL').textContent = reportUrl;
   $('#reportCodeURL').dataset.copy = reportUrl;
-  $('#reportCodeKey').textContent = secret;
+  $('#reportCodeKey').textContent = secret ? '已配置 · 点击复制密钥' : '未配置';
   $('#reportCodeKey').dataset.copy = secret;
 
-  const phpCode = `// ─── Sub-Panel 上报 (${tenantName}) ───
-$subPanelUrl = '${reportUrl}';
-$subPanelKey = '${secret}';
+  const phpCode = `// ─── Sub-Panel 上报 ───
+$subPanelUrl = '${phpString(reportUrl)}';
+$subPanelKey = '${phpString(secret)}';
 
 $reportData = [
     'token'              => $user->token,
@@ -971,9 +1085,7 @@ $reportData = [
     'wallet_balance'     => $user->balance ?? 0,
     'commission_balance' => $user->commission_balance ?? 0,
     'user_created_at'    => (string)$user->created_at,
-    'ip'                 => $request->header('cf-connecting-ip')
-                            ?? explode(',', $request->header('x-forwarded-for', ''))[0]
-                            ?? $request->ip(),
+    'ip'                 => $request->ip(),
     'user_agent'         => $request->userAgent() ?? '',
     'site_domain'        => $request->getHost(),
 ];
@@ -989,11 +1101,11 @@ try {
 
   $('#reportCodePHP').textContent = phpCode;
   $('#reportCodeModal').dataset.php = phpCode;
-  $('#reportCodeModal').style.display = 'flex';
+  if (activeTab === 'tenants') showDialog('reportCodeModal', '#reportCodeClose');
   bindCopyHandlers($('#reportCodeModal'));
 }
 
-function closeReportCodeModal() { $('#reportCodeModal').style.display = 'none'; }
+function closeReportCodeModal() { closeActiveDialog('reportCodeModal'); }
 $('#reportCodeClose').addEventListener('click', closeReportCodeModal);
 $('#reportCodeModal').addEventListener('click', e => {
   if (e.target.id === 'reportCodeModal') closeReportCodeModal();
@@ -1055,7 +1167,7 @@ async function loadRulesTable() {
   const r = await api('/api/detect_rules');
   const tbody = $('#rulesTbody'); tbody.innerHTML = '';
   if (!Array.isArray(r) || !r.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无规则,点右上角「+ 新增规则」开始</td></tr>';
+    setEmptyRow(tbody, '暂无触发规则，可新增规则。');
     return;
   }
   for (const x of r) {
@@ -1108,7 +1220,6 @@ function openRuleModal(r) {
   const set = (id, v) => { $('#' + id).value = v == null ? '' : v; };
   set('ruleFormName',          isEdit ? r.name : '');
   set('ruleFormDesc',          isEdit ? r.desc : '');
-  // 等级字段已废弃,命中即投毒。
   set('ruleFormTfWin',         isEdit ? (r.token_freq_window_sec || '') : '');
   set('ruleFormTfGte',         isEdit ? (r.token_freq_gte || '') : '');
   set('ruleFormIfWin',         isEdit ? (r.ip_freq_window_sec || '') : '');
@@ -1128,10 +1239,10 @@ function openRuleModal(r) {
   $('#ruleFormEnabledOff').checked = !enabledOn;
   $('#ruleModal').dataset.originalName = isEdit ? r.name : '';
   $('#ruleModal').dataset.sortOrder = isEdit ? String(r.sort_order || 0) : '0';
-  $('#ruleModal').style.display = 'flex';
+  showDialog('ruleModal', '#ruleFormName');
 }
 
-function closeRuleModal() { $('#ruleModal').style.display = 'none'; }
+function closeRuleModal() { closeActiveDialog('ruleModal'); }
 
 $('#ruleAddBtn').addEventListener('click', () => openRuleModal(null));
 $('#ruleModalClose').addEventListener('click', closeRuleModal);
@@ -1181,71 +1292,95 @@ $('#ruleFormSave').addEventListener('click', async () => {
 // ────────────────────────────────────────────────
 // 修改密码 + 一键透传(设置页)
 // ────────────────────────────────────────────────
+let passthroughBusy = false;
+function renderPassthrough(enabled) {
+  $('#passthroughToggle').checked = enabled;
+  $('#passthroughLabel').textContent = enabled ? '已开启' : '已关闭';
+  $('#passthroughStatusPill').style.display = enabled ? '' : 'none';
+}
 async function loadPassthrough() {
-  const r = await api('/api/settings/passthrough');
-  if (!r) return;
+  if (passthroughBusy) return;
+  passthroughBusy = true;
   const cb = $('#passthroughToggle');
-  const lbl = $('#passthroughLabel');
-  const pill = $('#passthroughStatusPill');
-  if (!cb) return;
-  cb.checked = !!r.enabled;
-  lbl.textContent = r.enabled ? '已开启' : '已关闭';
-  pill.style.display = r.enabled ? '' : 'none';
+  cb.disabled = true;
+  $('#passthroughLabel').textContent = '正在读取状态…';
+  const r = await api('/api/settings/passthrough');
+  passthroughBusy = false;
+  if (!r) { $('#passthroughLabel').textContent = '状态读取失败，请刷新'; return; }
+  renderPassthrough(r.enabled);
+  cb.disabled = false;
 }
 
-// ─── 上报密钥设置 ───
+let reportBusy = false;
+const reportInput = $('#reportSecretInput');
+const reportSave = $('#reportSecretSave');
 async function loadReportSecret() {
+  if (reportBusy) return;
+  reportBusy = true;
+  reportInput.disabled = reportSave.disabled = true;
   const r = await api('/api/report-info');
+  reportBusy = false;
   if (!r) return;
-  const input = $('#reportSecretInput');
-  if (input) input.value = r.report_secret || '';
-  // 清除缓存,让接入代码弹窗下次重新拉取
-  _reportInfo = null;
+  reportInput.value = r.report_secret || '';
+  reportInput.disabled = reportSave.disabled = false;
 }
 
-$('#reportSecretSave')?.addEventListener('click', async () => {
-  const val = ($('#reportSecretInput').value || '').trim();
+reportSave.addEventListener('click', async () => {
+  const val = reportInput.value.trim();
+  if (!val && !confirm('清除密钥后，上报接口将不再校验密钥。确认清除？')) return;
+  reportBusy = true;
+  reportInput.disabled = reportSave.disabled = true;
   const r = await apiPost('/api/report-info/save', { report_secret: val });
-  if (r && r.ok) {
-    toast(val ? '密钥已保存' : '密钥已清除(上报接口不校验)', 'success');
-    _reportInfo = null; // 清缓存
-  } else {
-    toast((r && r.error) || '保存失败', 'error');
+  reportBusy = false;
+  reportInput.disabled = reportSave.disabled = false;
+  if (r?.ok) {
+    reportInput.value = val;
+    toast(val ? '密钥已保存。请同步更新各机场的上报代码。' : '密钥已清除（上报接口不校验）', 'success');
+  } else if (r) {
+    toast(r.error || '保存失败', 'error');
   }
 });
 
-$('#pwSaveBtn')?.addEventListener('click', async () => {
+$('#pwSaveBtn')?.addEventListener('click', async e => {
   const oldP = $('#pwOld').value;
   const newP = $('#pwNew').value;
   const newP2 = $('#pwNew2').value;
   if (!oldP || !newP) { toast('请填写原密码和新密码', 'error'); return; }
-  if (newP.length < 8) { toast('新密码至少 8 位', 'error'); return; }
+  const bytes = new TextEncoder().encode(newP).length;
+  if (bytes < 8 || bytes > 72) { toast('新密码须为 8–72 字节', 'error'); return; }
   if (newP !== newP2) { toast('两次输入的新密码不一致', 'error'); return; }
+  const btn = e.currentTarget;
+  btn.disabled = true;
   const r = await apiPost('/api/auth/change_password', { old_password: oldP, new_password: newP });
-  if (r && r.ok) {
-    toast('密码已修改,即将退出登录…', 'success');
+  if (r?.ok) {
+    for (const id of ['#pwOld', '#pwNew', '#pwNew2']) $(id).value = '';
+    toast('密码已修改，即将退出登录…', 'success');
     setTimeout(() => { location.href = '/login'; }, 1500);
   } else {
-    toast((r && r.error) || '修改失败', 'error');
+    btn.disabled = false;
+    if (r) toast(r.error || '修改失败', 'error');
   }
 });
 
 $('#passthroughToggle')?.addEventListener('change', async (e) => {
-  const want = e.target.checked;
+  const cb = e.currentTarget;
+  const want = cb.checked;
   const msg = want
-    ? '⚠️ 开启「一键透传」后,黑名单/触发规则/投毒全部失效,所有请求直接转发到上游。\n\n确认开启?'
-    : '关闭「一键透传」,恢复全部规则。\n\n确认关闭?';
-  if (!confirm(msg)) {
-    e.target.checked = !want;
-    return;
-  }
+    ? '开启后，匹配订阅路径的请求将跳过名单和触发规则；订阅展示和 Lumi 兼容处理仍可能生效。确认开启？'
+    : '关闭后恢复正常规则处理。确认关闭？';
+  cb.checked = !want;
+  if (!confirm(msg)) return;
+  passthroughBusy = true;
+  cb.disabled = true;
   const r = await apiPost('/api/settings/passthrough', { enabled: want });
-  if (r && r.ok) {
-    toast(want ? '一键透传已开启' : '一键透传已关闭', want ? 'warning' : 'success');
-    loadPassthrough();
-  } else {
-    e.target.checked = !want;
-    toast((r && r.error) || '失败', 'error');
+  passthroughBusy = false;
+  if (r?.ok) {
+    renderPassthrough(r.enabled);
+    cb.disabled = false;
+    toast(r.enabled ? '一键透传已开启' : '一键透传已关闭', r.enabled ? 'warning' : 'success');
+  } else if (r) {
+    toast(r.error || '保存失败', 'error');
+    await loadPassthrough();
   }
 });
 
@@ -1262,13 +1397,16 @@ function fmtBytes(b) {
   return v.toFixed(i > 1 ? 1 : 0) + ' ' + units[i];
 }
 
+let suspectsRequest = 0;
 async function loadSuspects() {
+  const request = ++suspectsRequest;
   const q = new URLSearchParams({
     tenant: state.tenant,
     window: $('#suspectWindow').value || '168h',
   });
   const rows = await api('/api/suspects?' + q);
-  window._suspectsData = rows || [];
+  if (request !== suspectsRequest || !rows) return;
+  window._suspectsData = rows;
   renderSuspects();
 }
 
@@ -1544,188 +1682,114 @@ $('#suspectsList').addEventListener('click', async (e) => {
   if (r && r.ok) loadSuspects();
 });
 
-// ════════════════════════════════════════════════════
-// 交互打磨:进度条 / 搜索高亮 / 快捷键 / 验证 / loading
-// ════════════════════════════════════════════════════
-
-// ─── 1. 全局进度条(monkey-patch fetch) ───
-(function () {
-  const bar = document.getElementById('progressBar');
-  let inflight = 0;
-  const origFetch = window.fetch;
-  window.fetch = function (...args) {
-    inflight++;
-    if (inflight === 1) { bar.className = 'progress-bar loading'; bar.style.width = ''; }
-    return origFetch.apply(this, args).finally(() => {
-      inflight--;
-      if (inflight <= 0) {
-        inflight = 0;
-        bar.classList.remove('loading');
-        bar.classList.add('done');
-        setTimeout(() => { bar.className = 'progress-bar'; bar.style.width = '0'; }, 500);
+// Shared view helpers
+function setEmptyRow(tbody, message) {
+  tbody.replaceChildren();
+  const cell = tbody.insertRow().insertCell();
+  cell.colSpan = tbody.closest('table').tHead.rows[0].cells.length;
+  cell.className = 'empty-state';
+  cell.textContent = message;
+}
+function highlightTerms(root, keywords) {
+  if (!keywords.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const hits = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const term = keywords.find(x => node.nodeValue.includes(x));
+    if (term) hits.push([node, term]);
+  }
+  for (const [node, term] of hits) {
+    const fragment = document.createDocumentFragment();
+    node.nodeValue.split(term).forEach((text, index) => {
+      if (index) {
+        const mark = document.createElement('mark');
+        mark.className = 'hl';
+        mark.textContent = term;
+        fragment.append(mark);
       }
+      fragment.append(text);
     });
-  };
-})();
-
-// ─── 2. 搜索高亮:事件卡片内 IP/Token 匹配词标亮 ───
-(function () {
-  const origLoadEvents = window.loadEvents || loadEvents;
-  // 重写 loadEvents 加高亮后处理
-  const _origLoadEventsRef = loadEvents;
-  const patchedLoadEvents = async function (append) {
-    await _origLoadEventsRef(append);
-    highlightEventCards();
-  };
-  // 替换全局引用
-  window.loadEvents = patchedLoadEvents;
-  // 同时 patch 查询按钮
-  $('#evQuery').removeEventListener('click', null); // 无法直接移除,改用下面的重绑
-  $('#evQuery').addEventListener('click', () => patchedLoadEvents(false), true);
-
-  function highlightEventCards() {
-    const ipVal = ($('#evIP').value || '').trim();
-    const tokVal = ($('#evToken').value || '').trim();
-    if (!ipVal && !tokVal) return;
-    const list = $('#evList');
-    if (!list) return;
-    const keywords = [];
-    if (ipVal) keywords.push(ipVal);
-    if (tokVal) keywords.push(tokVal);
-    // walk text nodes inside ev-cards
-    const walker = document.createTreeWalker(list, NodeFilter.SHOW_TEXT);
-    const hits = [];
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      for (const kw of keywords) {
-        if (node.nodeValue && node.nodeValue.includes(kw)) {
-          hits.push({ node, kw });
-          break;
-        }
-      }
-    }
-    for (const { node, kw } of hits) {
-      const parent = node.parentNode;
-      if (!parent || parent.tagName === 'MARK') continue;
-      const parts = node.nodeValue.split(kw);
-      const frag = document.createDocumentFragment();
-      parts.forEach((p, i) => {
-        if (i > 0) {
-          const mark = document.createElement('mark');
-          mark.className = 'hl';
-          mark.textContent = kw;
-          frag.appendChild(mark);
-        }
-        if (p) frag.appendChild(document.createTextNode(p));
-      });
-      parent.replaceChild(frag, node);
-    }
+    node.replaceWith(fragment);
   }
-})();
-
-// ─── 3. 键盘快捷键 ───
-document.addEventListener('keydown', (e) => {
-  // 忽略:在 input/textarea/select 中时只响应 Esc
-  const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-
-  // Esc 关弹窗
-  if (e.key === 'Escape') {
-    const modals = ['#tenantModal', '#ruleModal', '#reportCodeModal'];
-    for (const sel of modals) {
-      const m = document.querySelector(sel);
-      if (m && m.style.display === 'flex') {
-        m.style.display = 'none';
+}
+let activeDialog, dialogOpener;
+function showDialog(id, initial) {
+  closeActiveDialog();
+  const overlay = document.getElementById(id);
+  dialogOpener = document.activeElement;
+  if (overlay.parentElement !== document.body) document.body.append(overlay);
+  activeDialog = overlay;
+  $('.app').inert = true;
+  overlay.hidden = false;
+  document.body.classList.add('has-modal');
+  (overlay.querySelector(initial) || overlay.querySelector('[role="dialog"]')).focus();
+}
+function closeActiveDialog(id) {
+  if (!activeDialog || (id && activeDialog.id !== id)) return;
+  activeDialog.hidden = true;
+  activeDialog = null;
+  $('.app').inert = false;
+  document.body.classList.remove('has-modal');
+  dialogOpener?.focus();
+  dialogOpener = null;
+}
+document.addEventListener('keydown', e => {
+  if (activeDialog) {
+    if (e.key === 'Escape') { e.preventDefault(); closeActiveDialog(); }
+    if (e.key === 'Tab') {
+      const targets = [...activeDialog.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]')]
+        .filter(el => el.getClientRects().length && el.tabIndex >= 0);
+      const first = targets[0], last = targets.at(-1);
+      if (!first) { e.preventDefault(); return; }
+      if (!activeDialog.contains(document.activeElement) || (e.shiftKey && document.activeElement === first) || (!e.shiftKey && document.activeElement === last)) {
         e.preventDefault();
-        return;
+        (e.shiftKey ? last : first).focus();
       }
     }
-    // Esc 还可以 blur 当前输入框
-    if (inInput) { document.activeElement.blur(); e.preventDefault(); }
     return;
   }
-
-  if (inInput) return;
-
-  // R = 刷新当前 tab
-  if (e.key === 'r' || e.key === 'R') {
-    e.preventDefault();
-    $('#refreshBtn').click();
+  if (e.key === 'Escape' && $('#sidebar').classList.contains('menu-open')) {
+    setMenuOpen(false);
+    $('#navToggle').focus();
     return;
   }
-  // / = 聚焦事件搜索 IP 输入框(如果在事件页)
-  if (e.key === '/') {
-    const evTab = document.getElementById('tab-events');
-    if (evTab && evTab.classList.contains('active')) {
-      e.preventDefault();
-      $('#evIP').focus();
-    }
-    return;
-  }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || document.activeElement?.closest('input, textarea, select, [contenteditable]')) return;
+  if (e.key.toLowerCase() === 'r') { e.preventDefault(); $('#refreshBtn').click(); }
+  if (e.key === '/' && activeTab === 'events') { e.preventDefault(); $('#evIP').focus(); }
 });
 
-// ─── 4. 表单验证:shake + 红框 ───
-function validateRequired(el, msg) {
-  if (!el.value.trim()) {
-    el.classList.add('input-error');
-    el.closest('form, .card, .modal-body, section')?.classList.add('shake');
-    toast(msg || '此项不能为空', 'error');
-    el.focus();
-    setTimeout(() => {
-      el.classList.remove('input-error');
-      el.closest('.shake')?.classList.remove('shake');
-    }, 800);
-    return false;
-  }
-  return true;
-}
-// 暴露给可能需要用的地方
-window.validateRequired = validateRequired;
-
-// ─── 5. 按钮 loading 态工具函数 ───
-function withLoading(btn, asyncFn) {
-  if (btn.classList.contains('loading')) return;
+async function withLoading(btn, run) {
+  if (btn.disabled) return;
+  btn.disabled = true;
   btn.classList.add('loading');
-  asyncFn().finally(() => btn.classList.remove('loading'));
+  btn.setAttribute('aria-busy', 'true');
+  try { await run(); }
+  finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    btn.removeAttribute('aria-busy');
+  }
 }
-window.withLoading = withLoading;
-
-// 给刷新按钮加 loading
-(function () {
-  const origClick = $('#refreshBtn').onclick;
-  $('#refreshBtn').addEventListener('click', function () {
-    withLoading(this, async () => {
-      const active = document.querySelector('.navlink.active');
-      if (active && TAB_LOADERS[active.dataset.tab]) {
-        await TAB_LOADERS[active.dataset.tab]();
-      }
-    });
-  }, true);
-})();
-
-// 给事件「查询」按钮加 loading
-(function () {
-  const btn = $('#evQuery');
-  if (!btn) return;
-  btn.addEventListener('click', function () {
-    withLoading(this, () => loadEvents(false));
-  }, true);
-})();
 
 // ---- 订阅展示规则 ----
 let drEditingId = 0;
 let drEditingSort = 0;
+let drOriginalReplacements = '';
+const DR_MATCH_LABELS = { email_suffix: '邮箱后缀', email_exact: '完整邮箱', email_keyword: '邮箱关键词', all: '全部订阅' };
 let drRules = [];
 let drTenants = [];
 
 async function loadDisplayRules() {
-  const res = await Promise.all([api('/api/display-rules'), api('/api/tenants')]);
-  drRules = res[0] || [];
-  drTenants = res[1] || [];
+  const [rules, tenants] = await Promise.all([api('/api/display-rules'), api('/api/tenants')]);
+  if (!rules || !tenants) return;
+  drRules = rules;
+  drTenants = tenants;
   const tbody = $('#drTbody');
   if (!tbody) return;
   tbody.innerHTML = '';
   if (!drRules.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">还没有展示规则</td></tr>';
+    setEmptyRow(tbody, '暂无订阅展示规则');
     return;
   }
   for (const r of drRules) {
@@ -1733,7 +1797,7 @@ async function loadDisplayRules() {
     tr.innerHTML = `
       <td>${escapeHTML(r.name)}</td>
       <td>${escapeHTML(r.tenant || '')}</td>
-      <td>${escapeHTML('@' + (r.match_value || ''))}</td>
+      <td>${escapeHTML(DR_MATCH_LABELS[r.match_type] || '未知')} ${r.match_type === 'all' ? '' : escapeHTML(r.match_value || '—')}</td>
       <td>${escapeHTML(r.airport_to || '不改')}</td>
       <td>${r.enabled ? '启用' : '禁用'}</td>
       <td>
@@ -1762,7 +1826,6 @@ function drFillTenantSelect(current) {
     sel.appendChild(o);
   }
   if (current) sel.value = current;
-  else if (state.tenant && names.includes(state.tenant)) sel.value = state.tenant;
 }
 
 function drRepsToText(json) {
@@ -1772,16 +1835,24 @@ function drRepsToText(json) {
 }
 
 function drTextToReps(text) {
+  if (text === drRepsToText(drOriginalReplacements)) return drOriginalReplacements || '[]';
   const out = [];
-  for (const line of String(text || '').split(/\r?\n/)) {
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
     const i = line.indexOf('=');
-    if (i <= 0) continue;
-    const from = line.slice(0, i).trim();
-    if (!from) continue;
+    const from = i < 0 ? '' : line.slice(0, i).trim();
+    if (!from) throw new Error(`第 ${index + 1} 行应使用「旧词=新词」格式。`);
     out.push({ from, to: line.slice(i + 1), regex: false });
   }
-  return out;
+  return JSON.stringify(out);
 }
+function drUpdateMatch() {
+  const type = $('#drMatchType').value;
+  $('#drMatchRow').hidden = type === 'all';
+  $('#drMatchValue').disabled = type === 'all';
+  $('#drMatchValue').placeholder = type === 'email_suffix' ? '例如：example.com' : type === 'email_exact' ? '例如：user@example.com' : '例如：team';
+}
+$('#drMatchType').addEventListener('change', drUpdateMatch);
 
 function drResetForm(r) {
   drEditingId = r ? r.id : 0;
@@ -1789,33 +1860,38 @@ function drResetForm(r) {
   $('#drModalTitle').textContent = r ? '编辑规则' : '新增规则';
   $('#drName').value = r ? (r.name || '') : '';
   drFillTenantSelect(r ? r.tenant : '');
-  $('#drMatchValue').value = r ? (r.match_value || '') : '';
+  $('#drMatchType').value = r?.match_type || 'email_suffix';
+  $('#drMatchValue').value = r?.match_value || '';
+  drUpdateMatch();
   $('#drAirportFrom').value = r ? (r.airport_from || '') : '';
   $('#drAirportTo').value = r ? (r.airport_to || '') : '';
-  $('#drReps').value = r ? drRepsToText(r.replacements) : '';
+  drOriginalReplacements = r?.replacements || '';
+  $('#drReps').value = drRepsToText(drOriginalReplacements);
   $('#drEnabled').checked = r ? !!r.enabled : true;
 }
 
 function drOpenModal(r) {
   if (!drTenants.length) return toast('请先在机场管理里添加机场', 'error');
   drResetForm(r);
-  $('#drModal').style.display = 'flex';
+  showDialog('drModal', '#drName');
 }
 
 function drCloseModal() {
-  $('#drModal').style.display = 'none';
+  closeActiveDialog('drModal');
 }
 
 function drPayload() {
+  const type = $('#drMatchType').value;
+  const match = $('#drMatchValue').value.trim();
   return {
     id: drEditingId,
     name: $('#drName').value.trim(),
     tenant: $('#drTenant').value,
-    match_type: 'email_suffix',
-    match_value: $('#drMatchValue').value.trim().replace(/^@/, ''),
+    match_type: type,
+    match_value: type === 'all' ? '' : type === 'email_suffix' ? match.replace(/^@/, '') : match,
     airport_from: $('#drAirportFrom').value.trim(),
     airport_to: $('#drAirportTo').value.trim(),
-    replacements: JSON.stringify(drTextToReps($('#drReps').value)),
+    replacements: drTextToReps($('#drReps').value),
     scope_node: true,
     scope_group: true,
     scope_header: true,
@@ -1846,11 +1922,13 @@ $('#drTbody').addEventListener('click', async (ev) => {
   }
 });
 
-$('#drSave').addEventListener('click', async () => {
-  const body = drPayload();
-  if (!body.name) return toast('请填规则名', 'error');
+$('#drSave').addEventListener('click', e => withLoading(e.currentTarget, async () => {
+  let body;
+  try { body = drPayload(); } catch (err) { return toast(err.message, 'error'); }
+  if (!body.name) return toast('请填写规则名', 'error');
   if (!body.tenant) return toast('请选择机场', 'error');
-  if (!body.match_value) return toast('请填邮箱后缀', 'error');
+  if (body.match_type !== 'all' && !body.match_value) return toast('请填写匹配值', 'error');
+  if (!body.airport_to && !JSON.parse(body.replacements).length) return toast('请填写新机场名或至少一条关键词替换。', 'error');
   const res = await apiPost('/api/display-rules/save', body);
   if (res && res.ok) {
     toast('已保存', 'success');
@@ -1859,4 +1937,4 @@ $('#drSave').addEventListener('click', async () => {
   } else {
     toast((res && res.error) || '保存失败', 'error');
   }
-});
+}));

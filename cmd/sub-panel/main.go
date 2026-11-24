@@ -2,8 +2,7 @@
 //
 // 用法:
 //
-//	sub-panel -c /opt/Sub-Panel/config.yml
-//	sub-panel hashpwd <password>   # 生成 admin.password_hash 用
+//	sub-panel [-db /opt/Sub-Panel/data/sub-panel.db]
 package main
 
 import (
@@ -15,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -22,13 +22,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/huabanmao168/SubPanel/internal/banlist"
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/cloudip"
-	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
-	"github.com/huabanmao168/SubPanel/internal/faker"
+	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/proxy"
-	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/rules"
 	"github.com/huabanmao168/SubPanel/internal/slidingwin"
 	"github.com/huabanmao168/SubPanel/internal/store"
@@ -53,6 +52,32 @@ func main() {
 			}
 			fmt.Println(string(h))
 			return
+		case "legacy-db-path":
+			if len(os.Args) != 3 {
+				fmt.Fprintln(os.Stderr, "usage: sub-panel legacy-db-path <config.yml>")
+				os.Exit(2)
+			}
+			legacy, err := config.LoadLegacy(os.Args[2])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "invalid legacy configuration")
+				os.Exit(1)
+			}
+			path := legacy.Storage.SQLitePath
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(filepath.Dir(os.Args[2]), path)
+			}
+			fmt.Println(filepath.Clean(path))
+			return
+		case "restore-settings":
+			fs := flag.NewFlagSet("restore-settings", flag.ExitOnError)
+			dbPath := fs.String("db", config.DefaultDBPath, "SQLite 数据库路径")
+			_ = fs.Parse(os.Args[2:])
+			if err := restoreSettings(*dbPath); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Println("已恢复上一份系统设置；请启动服务验证。")
+			return
 		case "version":
 			fmt.Println(Version)
 			return
@@ -62,42 +87,51 @@ func main() {
 		}
 	}
 
-	var cfgPath string
+	var cfgPath, dbPath string
 	fs := flag.NewFlagSet("sub-panel", flag.ExitOnError)
-	fs.StringVar(&cfgPath, "c", "/opt/Sub-Panel/config.yml", "配置文件路径")
+	fs.StringVar(&dbPath, "db", config.DefaultDBPath, "SQLite 数据库路径")
+	fs.StringVar(&cfgPath, "c", config.LegacyConfigPath, "仅首次迁移时读取的旧 YAML 路径")
 	_ = fs.Parse(os.Args[1:])
+	legacyRequired := false
+	fs.Visit(func(f *flag.Flag) { legacyRequired = legacyRequired || f.Name == "c" })
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	cfg, err := config.Load(cfgPath)
+	st, savedCfg, err := openSettings(dbPath, cfgPath, legacyRequired)
 	if err != nil {
-		logger.Error("加载配置失败", "err", err)
+		logger.Error("加载数据库和配置失败", "err", err)
 		os.Exit(1)
 	}
+	defer st.Close()
+	cfg := savedCfg.ForRuntime()
 
-	if err := os.MkdirAll(filepathDir(cfg.Storage.SQLitePath), 0750); err != nil {
-		logger.Error("创建数据库目录失败", "err", err)
-		os.Exit(1)
-	}
 	if err := os.MkdirAll(filepathDir(cfg.HMACSaltFile), 0750); err != nil {
 		logger.Error("创建 salt 目录失败", "err", err)
 		os.Exit(1)
 	}
 
+	needExistingSalt, err := st.HasTokenIDs()
+	if err != nil {
+		logger.Error("读取订阅标识设置失败", "err", err)
+		os.Exit(1)
+	}
+	if needExistingSalt {
+		if _, err := os.Stat(cfg.HMACSaltFile); err != nil {
+			logger.Error("缺少原有订阅标识盐文件；请从备份恢复", "err", err)
+			os.Exit(1)
+		}
+	}
 	salt, err := token.LoadOrCreateSalt(cfg.HMACSaltFile)
 	if err != nil {
 		logger.Error("加载 HMAC salt 失败", "err", err)
 		os.Exit(1)
 	}
 	hasher := token.NewHasher(salt)
-
-	st, err := store.Open(cfg.Storage.SQLitePath, cfg.Storage.BatchFlushInterval.Std(), cfg.Storage.BatchFlushSize)
-	if err != nil {
-		logger.Error("打开数据库失败", "err", err)
+	if err := st.MigrateTokenIDs(hasher); err != nil {
+		logger.Error("迁移订阅标识失败", "err", err)
 		os.Exit(1)
 	}
-	defer st.Close()
 
 	bans := banlist.New(st)
 	if err := bans.LoadFromStore(context.Background()); err != nil {
@@ -105,11 +139,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// tenants: 首次启动把 yaml 里的种子写入 DB,之后以 DB 为准
-	if err := syncTenantsFromYAML(st, cfg, logger); err != nil {
-		logger.Error("初始化机场配置失败", "err", err)
-		os.Exit(1)
-	}
 	// 给老数据补 report_id
 	if err := st.BackfillReportIDs(); err != nil {
 		logger.Error("补 report_id 失败", "err", err)
@@ -120,23 +149,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	det, err := detector.New(&cfg.Detector)
+	rs, err := loadDetectRulesFromDB(st)
+	if err != nil {
+		logger.Error("加载触发规则失败", "err", err)
+		os.Exit(1)
+	}
+	// 用生效的数据库规则计算滑窗容量，不使用旧 YAML 阈值。
+	detectorCfg := cfg.Detector
+	detectorCfg.Rules = rs
+	det, err := detector.New(&detectorCfg)
 	if err != nil {
 		logger.Error("检测器初始化失败", "err", err)
 		os.Exit(1)
 	}
-
-	// 触发规则:首次启动用 yaml 种子写入 DB,之后 DB 为权威源,yaml 不再读
-	if err := seedDetectRulesFromYAML(st, cfg, logger); err != nil {
-		logger.Error("初始化触发规则失败", "err", err)
-		os.Exit(1)
-	}
-	if rs, err := loadDetectRulesFromDB(st); err != nil {
-		logger.Error("加载触发规则失败", "err", err)
-		os.Exit(1)
-	} else {
-		det.SetRules(rs)
-	}
+	det.SetRules(rs)
 
 	stopCh := make(chan struct{})
 	slidingwin.RunGC(stopCh, time.Minute, det.GCTargets()...)
@@ -182,9 +208,7 @@ func main() {
 	}
 	det.SetDynamicIPWhitelist(rulesMgr.IPWhitelisted)
 
-	fk := faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount)
-
-	gw, err := proxy.NewGateway(cfg, hasher, st, bans, det, fk, proxy.AutoBanCfg{}, logger)
+	gw, err := proxy.NewGateway(cfg, hasher, st, bans, det, logger)
 	if err != nil {
 		logger.Error("网关初始化失败", "err", err)
 		os.Exit(1)
@@ -237,12 +261,19 @@ func main() {
 	}
 
 	// admin server (先创建 ui,subMux 也要用它的 ReportHandler)
-	ui := webui.NewServer(cfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
+	ui := webui.NewServer(savedCfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
+	verifiedSince, err := st.VerifiedIngressSince(time.Now())
+	if err != nil {
+		logger.Error("初始化可信入口统计失败", "err", err)
+		os.Exit(1)
+	}
+	ui.SetVerifiedIngressSince(verifiedSince)
+	logger.Info("订阅入口仅允许配置的前置代理", "peers", savedCfg.AllowedIngressPeers(), "statistics_since", verifiedSince)
 
 	// 反代 server
 	subMux := http.NewServeMux()
 	subMux.HandleFunc("/healthz", proxy.Healthz)
-	subMux.Handle("/r/", ui.ReportHandler()) // v2board 上报走 80 端口
+	subMux.Handle("/r/", gw.RequireIngress(ui.ReportHandler()))
 	subMux.Handle("/", gw)
 	subSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -337,35 +368,11 @@ func printHelp() {
 	fmt.Println(`Sub-Panel - V2Board 订阅前置网关
 
 用法:
-  sub-panel -c <config.yml>        启动服务(反代 + Web UI)
-  sub-panel hashpwd <password>     生成 bcrypt 密码哈希(填到 admin.password_hash)
+  sub-panel [-db <sqlite.db>]      启动服务(反代 + Web UI)
+  sub-panel [-db <sqlite.db>] -c <legacy.yml>   首次读取指定的旧 YAML
+  sub-panel restore-settings [-db <sqlite.db>] 停服后恢复上一份系统配置
   sub-panel version                打印版本
   sub-panel help                   本帮助`)
-}
-
-// syncTenantsFromYAML: 首次启动(DB tenants 表为空)时把 cfg.Tenants 写入 DB 作为种子。
-// 之后再启动,DB 已有数据就不动 yaml 里的内容。
-func syncTenantsFromYAML(st *store.Store, cfg *config.Config, logger *slog.Logger) error {
-	n, err := st.CountTenants()
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	logger.Info("机场配置: 首次启动,把 yaml 种子写入数据库", "count", len(cfg.Tenants))
-	for _, t := range cfg.Tenants {
-		if err := st.UpsertTenant(store.TenantRow{
-			Name:          t.Name,
-			SubscribePath: t.SubscribePath,
-			Upstream:      t.Upstream,
-			UpstreamPath:  t.UpstreamPath,
-			Enabled:       true,
-		}); err != nil {
-			return fmt.Errorf("写入机场 %s: %w", t.Name, err)
-		}
-	}
-	return nil
 }
 
 // loadTenantsFromDB: 用 DB 里的(启用的)tenants 覆盖 cfg.Tenants,作为启动时的真实数据源。
@@ -390,38 +397,6 @@ func loadTenantsFromDB(st *store.Store, cfg *config.Config) error {
 	return nil
 }
 
-// seedDetectRulesFromYAML 首次启动时把 yaml 里的 detector.rules 写入 DB,DB 不空就跳过。
-func seedDetectRulesFromYAML(st *store.Store, cfg *config.Config, logger *slog.Logger) error {
-	n, err := st.CountDetectRules()
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	if len(cfg.Detector.Rules) == 0 {
-		logger.Info("触发规则: DB 为空且 yaml 无规则,跳过种子")
-		return nil
-	}
-	logger.Info("触发规则: 首次启动,把 yaml 种子写入数据库", "count", len(cfg.Detector.Rules))
-	for i, r := range cfg.Detector.Rules {
-		buf, err := json.Marshal(r.When)
-		if err != nil {
-			return fmt.Errorf("规则 %s 序列化失败: %w", r.Name, err)
-		}
-		if err := st.UpsertDetectRule(store.DetectRuleRow{
-			Name:      r.Name,
-			Desc:      r.Desc,
-			WhenJSON:  string(buf),
-			Enabled:   true,
-			SortOrder: i,
-		}); err != nil {
-			return fmt.Errorf("写入规则 %s: %w", r.Name, err)
-		}
-	}
-	return nil
-}
-
 // loadDetectRulesFromDB 读 DB 里启用的规则,反序列化成 config.Rule slice。
 func loadDetectRulesFromDB(st *store.Store) ([]config.Rule, error) {
 	rows, err := st.ListDetectRules()
@@ -438,9 +413,9 @@ func loadDetectRulesFromDB(st *store.Store) ([]config.Rule, error) {
 			return nil, fmt.Errorf("规则 %s 反序列化失败: %w", r.Name, err)
 		}
 		out = append(out, config.Rule{
-			Name:     r.Name,
-			Desc:     r.Desc,
-			When:     when,
+			Name: r.Name,
+			Desc: r.Desc,
+			When: when,
 		})
 	}
 	return out, nil

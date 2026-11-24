@@ -1,6 +1,6 @@
 // Package blacklist 全局黑名单 — 四个一键开关 + ISP 关键字。
 // 与 detector 触发规则解耦:detector 跑「行为型 + GeoIP 字段命中」逻辑,
-// 本模块跑「全局粗粒度拦截」,命中即投毒,优先级高于 detector。
+// 本模块跑「全局粗粒度拦截」,命中即拒绝，优先级高于 detector。
 //
 // 持久化:store.meta,key 前缀 bl_。热更新走 atomic.Pointer 快照,免锁读取。
 //
@@ -115,7 +115,7 @@ func IsOverseaCountry(iso, country string) bool {
 
 // IsBrowser 简单判断 — Accept 头含 text/html。
 // 真浏览器打开订阅链接时 Accept 带 text/html;但部分订阅客户端
-//(如 clash-verge)底层 HTTP 也发 text/html,故需配合 UA 白名单豁免,
+// (如 clash-verge)底层 HTTP 也发 text/html,故需配合 UA 白名单豁免,
 // 见 Evaluate 中 !IsKnownSubClient(ua) 的判断。
 func IsBrowser(acceptHeader string) bool {
 	return strings.Contains(strings.ToLower(acceptHeader), "text/html")
@@ -182,7 +182,7 @@ func (m *Manager) ISPHitKeyword(isp string) (bool, string) {
 //   - ua:         User-Agent 请求头(用于浏览器判定的订阅客户端豁免)
 //
 // 评估顺序:海外 → 云厂商 → CN-IDC → ISP 关键字 → 浏览器。任一命中即返回。
-// 顺序选择:粗→细,命中投毒后短路,省去后续 lookup。
+// 从粗到细检查，命中即返回，省去后续查找。
 func (m *Manager) Evaluate(iso, country, usageType, isp string, isCloud bool, accept, ua string) (bool, string) {
 	sn := m.Get()
 	if sn.OverseaEnabled && IsOverseaCountry(iso, country) {

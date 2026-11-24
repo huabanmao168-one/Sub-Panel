@@ -69,13 +69,18 @@ func (s *Server) apiDisplayRuleSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
 	id, err := s.st.UpsertDisplayRule(rule)
 	if err != nil {
 		s.logger.Error("save display rule", "err", err)
 		writeJSON(w, 500, map[string]any{"error": "保存失败"})
 		return
 	}
-	s.reloadDisplayRules()
+	if err := s.reloadDisplayRules(); err != nil {
+		writeJSON(w, 500, map[string]any{"error": "已保存，但展示规则刷新失败"})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "id": id})
 }
 
@@ -91,25 +96,31 @@ func (s *Server) apiDisplayRuleRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "缺少 id"})
 		return
 	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
 	if err := s.st.DeleteDisplayRule(body.ID); err != nil {
 		writeJSON(w, 500, map[string]any{"error": "删除失败"})
 		return
 	}
-	s.reloadDisplayRules()
+	if err := s.reloadDisplayRules(); err != nil {
+		writeJSON(w, 500, map[string]any{"error": "已删除，但展示规则刷新失败"})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // reloadDisplayRules 把最新规则推给网关,热生效。
-func (s *Server) reloadDisplayRules() {
+func (s *Server) reloadDisplayRules() error {
 	if s.gw == nil {
-		return
+		return nil
 	}
 	rules, err := s.st.ListDisplayRules()
 	if err != nil {
 		s.logger.Error("reload display rules", "err", err)
-		return
+		return err
 	}
 	s.gw.SetDisplayRules(rules)
+	return nil
 }
 
 // apiDisplayPreview 用给定规则对样例正文做一次改写,返回前后对比。

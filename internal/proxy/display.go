@@ -56,7 +56,7 @@ func (g *Gateway) matchDisplayRule(tenant, token string) *rewrite.Options {
 		return nil
 	}
 	var email string
-	if rep, err := g.st.GetUserReportByToken(token, tenant); err == nil && rep != nil {
+	if rep, err := g.st.GetUserReportByToken(g.hasher.Hash(token), tenant); err == nil && rep != nil {
 		email = rep.Email
 	}
 	if email == "" {
@@ -96,7 +96,7 @@ func optionsOf(r *store.DisplayRule) *rewrite.Options {
 
 // transparentProxyDisplay 命中展示定制规则时走这条路:
 // 剥掉 Accept-Encoding → 缓冲上游响应 → 解压 → 改写名称与响应头 → 按原编码压回。
-// 任何一步失败都原样返回上游内容,并追加 display_failed 标签,不影响下发。
+// Unsupported encoding is forwarded unchanged; oversized responses are rejected.
 func (g *Gateway) transparentProxyDisplay(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, start time.Time,
@@ -118,6 +118,10 @@ func (g *Gateway) transparentProxyDisplay(
 
 	bw := &bufferingWriter{header: http.Header{}, status: 200, body: &bytes.Buffer{}}
 	rp.ServeHTTP(bw, r)
+	if bw.overflow {
+		g.subscriptionTransformError(w, pr, tokenHash, "display_failed", "body_too_large", tags, start)
+		return
+	}
 
 	// 上游非 2xx:原样透传(错误体不参与改写)
 	if bw.status < 200 || bw.status >= 300 {
@@ -153,8 +157,15 @@ func (g *Gateway) transparentProxyDisplay(
 	enc := strings.ToLower(strings.TrimSpace(bw.header.Get("Content-Encoding")))
 	decoded, decErr := decodeBody(rawBody, enc)
 	if decErr != nil {
-		decoded = rawBody
-		enc = ""
+		for k, vs := range bw.header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(bw.status)
+		_, _ = w.Write(rawBody)
+		g.logEvent(pr, tokenHash, "pass", bw.status, append(tags, "decode_failed"), time.Since(start).Milliseconds(), int64(len(rawBody)), start)
+		return
 	}
 
 	res := rewrite.Apply(decoded, bw.header.Get("Content-Type"), opts)
@@ -174,7 +185,7 @@ func (g *Gateway) transparentProxyDisplay(
 	}
 
 	for k, vs := range bw.header {
-		if strings.EqualFold(k, "Content-Length") {
+		if isBodyHeader(k) {
 			continue
 		}
 		for _, v := range vs {
@@ -193,7 +204,7 @@ func (g *Gateway) transparentProxyDisplay(
 		UA:         pr.UA,
 		TokenHash:  tokenHash,
 		Flag:       pr.Flag,
-		Path:       pr.Path,
+		Path:       logPath(pr),
 		Status:     200,
 		Action:     "display",
 		RuleTags:   tags,

@@ -10,7 +10,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/slidingwin"
 )
 
-// Severity / sevRank 删除:规则不再分等级,命中即投毒。
+// 风控规则不分等级，命中后由网关拒绝请求。
 
 type Detector struct {
 	cfg         *config.DetectorCfg
@@ -55,20 +55,12 @@ func (d *Detector) SetDynamicIPWhitelist(fn func(string) bool) {
 }
 
 func New(cfg *config.DetectorCfg) (*Detector, error) {
-	// 找出最大窗口
-	maxWindow := time.Hour
+	// Keep sufficient history for rules added through the UI without a restart.
+	maxWindow := 24 * time.Hour
 	for _, r := range cfg.Rules {
-		w := r.When
-		for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens} {
-			if c != nil && c.Window.Std() > maxWindow {
-				maxWindow = c.Window.Std()
-			}
-		}
+		maxWindow = max(maxWindow, r.When.MaxWindow())
 	}
 	bucket := time.Minute
-	if maxWindow < 5*time.Minute {
-		bucket = 30 * time.Second
-	}
 
 	d := &Detector{
 		cfg:         cfg,
@@ -132,7 +124,7 @@ func (d *Detector) Observe(ip, tokenHash, ua string) {
 	_ = ua
 }
 
-// Result 检测结果。Hit=true 即命中,命中后由调用方直接投毒。
+// Result is a policy decision; the caller handles a hit by rejecting the request.
 type Result struct {
 	Hit  bool
 	Tags []string // 命中的规则名
@@ -247,7 +239,6 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
-
 
 // SetRules 用 DB 来源的规则覆盖 yaml 静态规则,热生效。
 // 传 nil 或空 slice 会清空快照,detector 回退到 cfg.Rules。

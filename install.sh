@@ -1,187 +1,187 @@
 #!/usr/bin/env bash
-# Sub-Panel 一键安装 / 升级脚本
-#
-# 用法:
-#   curl -fsSL https://raw.githubusercontent.com/huabanmao168-one/Sub-Panel/main/install.sh | bash
-#   或:wget -qO- ... | bash
-#   升级:再跑一次同样命令,会保留 /opt/Sub-Panel/{config.yml,data/}
-#
-# 卸载:/opt/Sub-Panel/uninstall.sh
+# Install or upgrade a tagged Sub-Panel release. --check verifies artifacts only.
 set -euo pipefail
+umask 077
 
 REPO="huabanmao168-one/Sub-Panel"
 INSTALL_DIR="/opt/Sub-Panel"
-TMPFS_DIR="/tmp/sub-panel"
-SERVICE_NAME="sub-panel"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-XDB_URL="https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region.xdb"
+SERVICE_NAME="sub-panel.service"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+XDB_URL="https://raw.githubusercontent.com/lionsoul2014/ip2region/f1781b7f9b7a17c96246433d83804404f0a22120/data/ip2region_v4.xdb"
+XDB_SHA256="a29fb3e8b204dfdf45b9bc082e12845b5eaac18cd467849d2888baa9fde383c8"
 
-C_GREEN='\033[0;32m'
-C_YELLOW='\033[0;33m'
-C_RED='\033[0;31m'
-C_BLUE='\033[0;34m'
-C_RESET='\033[0m'
+log() { printf '[Sub-Panel] %s\n' "$*"; }
+warn() { printf '[Sub-Panel] %s\n' "$*" >&2; }
+die() { warn "$*"; exit 1; }
 
-log()  { echo -e "${C_BLUE}[Sub-Panel]${C_RESET} $*"; }
-ok()   { echo -e "${C_GREEN}[Sub-Panel]${C_RESET} $*"; }
-warn() { echo -e "${C_YELLOW}[Sub-Panel]${C_RESET} $*"; }
-die()  { echo -e "${C_RED}[Sub-Panel]${C_RESET} $*" >&2; exit 1; }
-
-# 1) 必须 root
-[[ $EUID -eq 0 ]] || die "请用 root 运行(或 sudo)"
-
-# 2) 检测架构
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|amd64)  GOARCH="amd64" ;;
-  aarch64|arm64) GOARCH="arm64" ;;
-  *) die "不支持的架构: $ARCH(目前只发 amd64 / arm64)" ;;
+check=0
+case "${1:-}" in
+  '') ;;
+  --check) check=1 ;;
+  -h|--help) printf '用法: bash install.sh [--check]\n可选环境变量: SUB_PANEL_VERSION=vX.Y.Z, SUB_PANEL_REFRESH_XDB=1\n'; exit 0 ;;
+  *) die "不支持的参数: $1" ;;
 esac
-log "架构: $ARCH → $GOARCH"
-
-# 3) 检测依赖
-need_cmds=(curl tar systemctl)
-for c in "${need_cmds[@]}"; do
-  command -v "$c" >/dev/null 2>&1 || die "缺少命令: $c,请先 apt/yum install"
+[[ "$#" -le 1 ]] || die '只接受一个参数'
+[[ "$(uname -s)" == Linux ]] || die '仅支持使用 systemd 的 Linux'
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  aarch64|arm64) arch=arm64 ;;
+  *) die '仅支持 Linux amd64 / arm64' ;;
+esac
+for cmd in curl tar sha256sum awk grep mktemp install; do
+  command -v "$cmd" >/dev/null || die "缺少命令: $cmd"
 done
-
-# 4) 取版本号
-log "查询最新版本…"
-if [[ -n "${SUB_PANEL_VERSION:-}" ]]; then
-  TAG="$SUB_PANEL_VERSION"
-  log "环境变量指定版本: $TAG"
-else
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4 || true)"
-  [[ -n "$TAG" ]] || die "未能获取 Release tag,请检查 GitHub API 或手动指定 SUB_PANEL_VERSION=v0.1.0"
-  log "最新版本: $TAG"
+if (( ! check )); then
+  [[ $EUID -eq 0 ]] || die '请以 root 或 sudo 运行'
+  for cmd in systemctl flock; do command -v "$cmd" >/dev/null || die "缺少命令: $cmd"; done
+  systemctl show --property=Version --value >/dev/null || die '无法连接到 systemd，未修改服务'
+  exec 9>/run/lock/sub-panel-install.lock
+  flock -n 9 || die '另一个 Sub-Panel 安装任务正在运行'
 fi
 
-ASSET="sub-panel-linux-${GOARCH}.tar.gz"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+tmp="$(mktemp -d)"
+backup=''
+was_active=0
+replacing=0
+cleanup() {
+  local status=$?
+  rm -rf -- "$tmp"
+  if (( status != 0 )); then
+    if (( was_active && ! replacing )); then
+      systemctl start "$SERVICE_NAME" || warn '备份未完成，旧服务也未能重新启动。'
+    elif [[ -n "$backup" ]]; then
+      warn "升级未完成，原文件和默认数据目录的备份位于 $backup。请勿用旧二进制直接运行已迁移的数据库。"
+    fi
+  fi
+}
+trap cleanup EXIT
 
-# 5) 是升级还是首装?
-IS_UPGRADE=0
-if [[ -x "${INSTALL_DIR}/sub-panel" ]]; then
-  IS_UPGRADE=1
-  OLD_VER="$(${INSTALL_DIR}/sub-panel version 2>/dev/null || echo "unknown")"
-  log "检测到已安装 (v${OLD_VER}),将升级到 ${TAG}"
-else
-  log "首次安装到 ${INSTALL_DIR}"
+download() { curl --fail --silent --show-error --location --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 180 --output "$2" "$1"; }
+verify_sha() {
+  local expected=${1,,} actual
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+  actual="$(sha256sum -- "$2")" || return 1
+  [[ "${actual%% *}" == "$expected" ]]
+}
+
+tag=${SUB_PANEL_VERSION:-}
+if [[ -z "$tag" ]]; then
+  download "https://api.github.com/repos/${REPO}/releases/latest" "$tmp/release.json" || die '无法读取最新发行版；可设置 SUB_PANEL_VERSION=vX.Y.Z'
+  tag="$(awk -F '"' '/^[[:space:]]*"tag_name"[[:space:]]*:/ {print $4; exit}' "$tmp/release.json")"
 fi
-
-# 6) 下载二进制
-TMP_DIR="$(mktemp -d)"
-trap "rm -rf ${TMP_DIR}" EXIT
-log "下载: ${DOWNLOAD_URL}"
-curl -fL --progress-bar -o "${TMP_DIR}/${ASSET}" "${DOWNLOAD_URL}" \
-  || die "下载失败,请检查网络或 Release 是否上传"
-
-log "解包…"
-tar -xzf "${TMP_DIR}/${ASSET}" -C "${TMP_DIR}"
-[[ -f "${TMP_DIR}/sub-panel" ]] || die "解包后未找到 sub-panel 二进制"
-
-# 7) 准备目录
-mkdir -p "${INSTALL_DIR}/data" "${TMPFS_DIR}"
-
-# 8) 停服务(若已运行)
-if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-  log "停止旧服务…"
-  systemctl stop "$SERVICE_NAME"
+[[ "$tag" =~ ^v[0-9]+(\.[0-9]+){2}([-+][A-Za-z0-9._-]+)?$ ]] || die '无效的发行版版本号'
+asset="sub-panel-linux-${arch}.tar.gz"
+release="https://github.com/${REPO}/releases/download/${tag}"
+raw="https://raw.githubusercontent.com/${REPO}/${tag}"
+log "正在下载并校验 ${tag} (${arch})"
+download "$release/$asset" "$tmp/$asset" || die '二进制下载失败'
+download "$release/$asset.sha256" "$tmp/$asset.sha256" || die 'SHA-256 文件下载失败'
+expected="$(awk 'NR==1 {print $1}' "$tmp/$asset.sha256")"
+verify_sha "$expected" "$tmp/$asset" || die '发行包 SHA-256 校验失败，未修改服务'
+# Extract only named regular content into newly created files.
+tar -xzOf "$tmp/$asset" sub-panel > "$tmp/sub-panel" || die '发行包缺少二进制'
+chmod 0755 "$tmp/sub-panel"
+[[ "$("$tmp/sub-panel" version)" == "${tag#v}" ]] || die '发行包中的二进制版本与标签不符'
+if ! tar -xzOf "$tmp/$asset" sub-panel.service > "$tmp/sub-panel.service" 2>/dev/null; then
+  download "$raw/scripts/sub-panel.service" "$tmp/sub-panel.service" || die '无法获取同版本的 systemd unit'
 fi
-
-# 9) 替换二进制
-install -m 0755 "${TMP_DIR}/sub-panel" "${INSTALL_DIR}/sub-panel"
-ok "二进制已安装: ${INSTALL_DIR}/sub-panel"
-
-# 10) 首装才写默认 config 和 xdb
-if [[ "$IS_UPGRADE" -eq 0 ]]; then
-  if [[ ! -f "${INSTALL_DIR}/config.yml" ]]; then
-    log "下载默认 config.yml…"
-    curl -fsSL -o "${INSTALL_DIR}/config.yml" \
-      "https://raw.githubusercontent.com/${REPO}/main/configs/config.example.yml" \
-      || die "下载默认配置失败"
-    ok "默认配置已写入: ${INSTALL_DIR}/config.yml"
+grep -Eq '^ExecStart=/opt/Sub-Panel/sub-panel([[:space:]]|$)' "$tmp/sub-panel.service" || die '发行版的 systemd unit 缺少预期启动命令'
+legacy=0
+if grep -Eq '^ExecStart=.*[[:space:]]-c[[:space:]]' "$tmp/sub-panel.service"; then
+  legacy=1
+  if [[ ! -e "$INSTALL_DIR/config.yml" ]] || (( check )); then
+    download "$raw/configs/config.example.yml" "$tmp/config.yml" || die '无法获取旧版默认配置'
   fi
 fi
 
-# 11) 下载 ip2region.xdb(放 tmpfs + 备份一份到 /opt/Sub-Panel)
-if [[ ! -f "${INSTALL_DIR}/ip2region.xdb" ]] || [[ "${SUB_PANEL_REFRESH_XDB:-0}" == "1" ]]; then
-  log "下载 ip2region.xdb(满载版,约 12MB)…"
-  curl -fL --progress-bar -o "${INSTALL_DIR}/ip2region.xdb" "$XDB_URL" \
-    || warn "xdb 下载失败,可手动放到 ${INSTALL_DIR}/ip2region.xdb"
+if (( check )) || [[ ! -s "$INSTALL_DIR/ip2region.xdb" ]] || [[ "${SUB_PANEL_REFRESH_XDB:-0}" == 1 ]]; then
+  log '正在下载并校验 GeoIP IPv4 数据库'
+  if ! download "$XDB_URL" "$tmp/ip2region.xdb" || ! verify_sha "$XDB_SHA256" "$tmp/ip2region.xdb"; then
+    rm -f -- "$tmp/ip2region.xdb"
+    if (( check )); then die 'GeoIP 下载或校验失败'; fi
+    warn 'GeoIP 下载或校验失败，保留现有库；新装可在设置页补配。'
+  fi
 fi
-# 拷一份到 tmpfs(内存盘,加速)
-if [[ -f "${INSTALL_DIR}/ip2region.xdb" ]]; then
-  cp -f "${INSTALL_DIR}/ip2region.xdb" "${TMPFS_DIR}/ip2region.xdb"
-  ok "xdb 已就位: ${TMPFS_DIR}/ip2region.xdb(tmpfs)"
+if (( check )); then
+  log "${tag} ($arch) 发行包、systemd unit 和 GeoIP 下载验证通过；未修改系统"
+  exit 0
 fi
 
-# 12) 安装 systemd unit
-log "写入 systemd unit…"
-curl -fsSL -o "$SERVICE_FILE" \
-  "https://raw.githubusercontent.com/${REPO}/main/scripts/sub-panel.service" \
-  || die "下载 systemd unit 失败"
-systemctl daemon-reload
+# Catch legacy databases outside the standard location before stopping an
+# installation that has no systemd drop-in to select the custom database.
+if (( ! legacy )) && [[ -f "$INSTALL_DIR/config.yml" ]]; then
+  dropins="$(systemctl show "$SERVICE_NAME" --property=DropInPaths --value 2>/dev/null || true)"
+  if [[ -z "$dropins" && ! -f "$INSTALL_DIR/data/.sqlite-bootstrap" ]]; then
+    db_hint="$("$tmp/sub-panel" legacy-db-path "$INSTALL_DIR/config.yml")" || die '旧 YAML 无法读取；请先确认数据库位置，服务未停止'
+    if [[ "$db_hint" != "$INSTALL_DIR/data/sub-panel.db" ]]; then
+      die '旧实例使用自定义 SQLite 路径。请先备份并按 README 添加 -db 的 systemd drop-in，服务未停止。'
+    fi
+  fi
+fi
 
-# 13) 写卸载脚本
-cat > "${INSTALL_DIR}/uninstall.sh" <<'UNINST'
+mkdir -p -- "$INSTALL_DIR/data"
+if [[ -x "$INSTALL_DIR/sub-panel" || -e "$SERVICE_FILE" ]]; then
+  log '停止旧服务并备份现有文件'
+  if systemctl is-active --quiet "$SERVICE_NAME"; then was_active=1; fi
+  if [[ "$(systemctl show "$SERVICE_NAME" --property=LoadState --value)" != not-found ]]; then
+    systemctl stop "$SERVICE_NAME"
+  fi
+  backup="$(mktemp -d "$INSTALL_DIR/upgrade-backup.XXXXXXXX")"
+  for file in sub-panel config.yml data ip2region.xdb; do
+    if [[ -e "$INSTALL_DIR/$file" ]]; then cp -a -- "$INSTALL_DIR/$file" "$backup/"; fi
+  done
+  if [[ -f "$SERVICE_FILE" ]]; then cp -a -- "$SERVICE_FILE" "$backup/"; fi
+  log "备份位置: $backup（外置数据库、盐及自定义 unit drop-in 请单独备份）"
+fi
+
+# Stage beside the destination so rename cannot expose a partial executable.
+replace_file() {
+  local source=$1 target=$2 mode=$3 staging
+  staging="$(mktemp "${target}.new.XXXXXXXX")"
+  if ! install -m "$mode" -- "$source" "$staging" || ! mv -fT -- "$staging" "$target"; then
+    rm -f -- "$staging"
+    return 1
+  fi
+}
+replacing=1
+replace_file "$tmp/sub-panel" "$INSTALL_DIR/sub-panel" 0755
+replace_file "$tmp/sub-panel.service" "$SERVICE_FILE" 0644
+if [[ -f "$tmp/config.yml" && ! -e "$INSTALL_DIR/config.yml" ]]; then
+  replace_file "$tmp/config.yml" "$INSTALL_DIR/config.yml" 0600
+fi
+if [[ -f "$tmp/ip2region.xdb" ]]; then
+  replace_file "$tmp/ip2region.xdb" "$INSTALL_DIR/ip2region.xdb" 0644
+fi
+
+cat > "$tmp/uninstall.sh" <<'UNINST'
 #!/usr/bin/env bash
-# Sub-Panel 卸载脚本。默认保留 config + data,加 --purge 才全删。
 set -euo pipefail
-PURGE=0
-[[ "${1:-}" == "--purge" ]] && PURGE=1
-[[ $EUID -eq 0 ]] || { echo "请用 root"; exit 1; }
-
-systemctl stop sub-panel 2>/dev/null || true
-systemctl disable sub-panel 2>/dev/null || true
-rm -f /etc/systemd/system/sub-panel.service
+[[ $EUID -eq 0 ]] || { echo '请以 root 或 sudo 运行' >&2; exit 1; }
+case "${1:-}" in ''|--purge) ;; *) echo '用法: uninstall.sh [--purge]' >&2; exit 2 ;; esac
+systemctl disable --now sub-panel.service
+rm -f -- /etc/systemd/system/sub-panel.service
 systemctl daemon-reload
-
-if [[ $PURGE -eq 1 ]]; then
-  rm -rf /opt/Sub-Panel /tmp/sub-panel
-  echo "✓ 已完全卸载(含 config + data)"
+if [[ "${1:-}" == '--purge' ]]; then
+  rm -rf -- /opt/Sub-Panel
+  echo '已卸载并删除 /opt/Sub-Panel；外置数据和 systemd drop-in 未删除。'
 else
-  rm -f /opt/Sub-Panel/sub-panel /opt/Sub-Panel/ip2region.xdb
-  rm -rf /tmp/sub-panel
-  echo "✓ 已卸载(保留 /opt/Sub-Panel/config.yml + data/)"
-  echo "  完全清除请加 --purge:bash /opt/Sub-Panel/uninstall.sh --purge"
+  rm -f -- /opt/Sub-Panel/sub-panel
+  echo '已卸载；保留配置、SQLite、盐文件和升级备份。'
 fi
 UNINST
-chmod +x "${INSTALL_DIR}/uninstall.sh"
+replace_file "$tmp/uninstall.sh" "$INSTALL_DIR/uninstall.sh" 0755
 
-# 14) 启动
-log "启动服务…"
-systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
-systemctl restart "$SERVICE_NAME"
-sleep 2
-
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-  ADMIN_PORT="$(grep -E "^admin_listen:" "${INSTALL_DIR}/config.yml" | awk -F'"' '{print $2}' | awk -F: '{print $2}')"
-  PUBLIC_IP="$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || echo "<服务器 IP>")"
-  echo ""
-  ok "════════════════════════════════════════════"
-  ok " Sub-Panel ${TAG} 安装成功 ✓"
-  ok "════════════════════════════════════════════"
-  echo ""
-  echo "  管理面:   http://${PUBLIC_IP}:${ADMIN_PORT:-19090}/"
-  if [[ "$IS_UPGRADE" -eq 0 ]]; then
-    echo "  默认账号: admin"
-    echo "  默认密码: admin123456"
-    echo ""
-    warn "  ⚠️  首次登录后请立刻去「设置」改密!"
-  fi
-  echo ""
-  echo "  常用命令:"
-  echo "    systemctl status  sub-panel    # 状态"
-  echo "    systemctl restart sub-panel    # 重启"
-  echo "    journalctl -u sub-panel -f     # 看日志"
-  echo "    bash /opt/Sub-Panel/uninstall.sh         # 卸载(留数据)"
-  echo "    bash /opt/Sub-Panel/uninstall.sh --purge # 完全卸载"
-  echo ""
-  echo "  升级:再跑一次本安装命令即可,会保留 config + data。"
-  echo ""
-else
-  warn "服务未能正常启动,查看日志:journalctl -u ${SERVICE_NAME} -e --no-pager"
-  systemctl status "$SERVICE_NAME" --no-pager || true
-  exit 1
+systemctl daemon-reload
+systemctl restart "$SERVICE_NAME" || die "启动失败，请查看 journalctl -u $SERVICE_NAME -n 50 --no-pager"
+for _ in 1 2 3 4 5; do
+  sleep 1
+  systemctl is-active --quiet "$SERVICE_NAME" || die "服务未稳定运行，请查看 journalctl -u $SERVICE_NAME -n 50 --no-pager"
+done
+systemctl enable "$SERVICE_NAME" >/dev/null
+if (( ! legacy )); then touch "$INSTALL_DIR/data/.sqlite-bootstrap"; fi
+log "${tag} 安装完成；管理面地址见 journalctl -u $SERVICE_NAME（管理面监听中）"
+if [[ -f "$INSTALL_DIR/data/sub-panel.db.initial-password" ]]; then
+  log '新装管理面默认只监听 127.0.0.1:19090，建议通过 SSH 端口转发访问。'
+  log "初始凭据: admin；密码文件 $INSTALL_DIR/data/sub-panel.db.initial-password（请登录后改密）"
 fi
+log '前置 Nginx 及跨机升级配置见仓库 README；本脚本不会修改防火墙或 Nginx。'

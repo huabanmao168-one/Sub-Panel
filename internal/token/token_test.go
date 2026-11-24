@@ -7,12 +7,13 @@ import (
 	"testing"
 )
 
-func TestHasherPassthrough(t *testing.T) {
-	// 用户要求 Hash 直接返回原 token 用于面板展示反查。
+func TestHasherLookup(t *testing.T) {
 	salt := []byte("01234567890123456789012345678901")
 	h := NewHasher(salt)
-	if got := h.Hash("user-token-abc"); got != "user-token-abc" {
-		t.Errorf("expected passthrough, got %q", got)
+	raw := "user-token-abc"
+	id := h.Hash(raw)
+	if !strings.HasPrefix(id, IDPrefix) || strings.Contains(id, raw) || h.Lookup(raw) != id || h.Lookup(id) != id || NewHasher([]byte("other-salt")).Hash(raw) == id {
+		t.Fatal("identifier must be private, stable and keyed")
 	}
 	if got := h.Hash(""); got != "" {
 		t.Errorf("empty must stay empty, got %q", got)
