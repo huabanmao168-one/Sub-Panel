@@ -213,6 +213,7 @@ func main() {
 		logger.Error("网关初始化失败", "err", err)
 		os.Exit(1)
 	}
+	gw.RunCloudflareIngressRefresh(ctxFetch)
 	// 注入 GeoIP 查询(给请求日志打 country/usage_type/isp)
 	gw.SetGeoLookup(func(ip string) (string, string, string) {
 		info := geo.Lookup(ip)
@@ -268,7 +269,11 @@ func main() {
 		os.Exit(1)
 	}
 	ui.SetVerifiedIngressSince(verifiedSince)
-	logger.Info("订阅入口仅允许配置的前置代理", "peers", savedCfg.AllowedIngressPeers(), "statistics_since", verifiedSince)
+	if savedCfg.IngressProfile() == config.IngressNginxCloudflare {
+		logger.Info("订阅入口仅允许 Cloudflare 转发的前置 Nginx", "nginx_egress", savedCfg.NginxEgressIPs, "trusted_client_header", savedCfg.NginxClientIP, "statistics_since", verifiedSince)
+	} else {
+		logger.Info("订阅入口仅允许配置的前置代理", "peers", savedCfg.AllowedIngressPeers(), "statistics_since", verifiedSince)
+	}
 
 	// 反代 server
 	subMux := http.NewServeMux()

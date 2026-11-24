@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
@@ -36,10 +35,12 @@ type Gateway struct {
 	bans   *banlist.List
 	det    *detector.Detector
 	// passthroughAll 一键透传:网关入口短路直接透传,不进任何规则/黑白名单。
-	passthroughAll atomic.Bool
-	ingressPeers   []netip.Prefix
-	requests       atomic.Uint64
-	logger         *slog.Logger
+	passthroughAll  atomic.Bool
+	ingressPeers    []netip.Prefix
+	cloudflarePeers atomic.Pointer[[]netip.Prefix]
+	nginxEgress     []netip.Addr
+	requests        atomic.Uint64
+	logger          *slog.Logger
 
 	// 可选:GeoIP 查询,用于把 country/usage_type/isp 落进请求日志
 	// nil 时三个字段留空,不影响其他流程
@@ -111,11 +112,10 @@ func NewGateway(
 	cfg *config.Config, hasher *token.Hasher, st *store.Store, bans *banlist.List,
 	det *detector.Detector, logger *slog.Logger,
 ) (*Gateway, error) {
-	peers, err := config.ParseIngressPeers(cfg.AllowedIngressPeers())
-	if err != nil {
+	g := &Gateway{cfg: cfg, hasher: hasher, st: st, bans: bans, det: det, logger: logger}
+	if err := g.configureIngress(); err != nil {
 		return nil, err
 	}
-	g := &Gateway{cfg: cfg, hasher: hasher, st: st, bans: bans, det: det, logger: logger, ingressPeers: peers}
 	if err := g.Reload(cfg.Tenants); err != nil {
 		return nil, err
 	}
@@ -209,38 +209,9 @@ func (g *Gateway) LookupTenant(urlPath string) (tenant *config.Tenant, pathMatch
 
 func (g *Gateway) Requests() uint64 { return g.requests.Load() }
 
-// allowedIngress checks the connection peer, never forwarding headers.
-func (g *Gateway) allowedIngress(remote string) bool {
-	host, _, err := net.SplitHostPort(remote)
-	if err != nil {
-		return false
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	ip = ip.WithZone("").Unmap()
-	for _, peer := range g.ingressPeers {
-		if peer.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// RequireIngress protects non-subscription routes such as the reporting endpoint.
-func (g *Gateway) RequireIngress(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !g.allowedIngress(r.RemoteAddr) {
-			http.NotFound(w, r)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !g.allowedIngress(r.RemoteAddr) {
+	clientIP, allowed := g.ingressClient(r)
+	if !allowed {
 		http.NotFound(w, r)
 		return
 	}
@@ -253,6 +224,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.requests.Add(1)
 	start := time.Now()
 	pr := parser.Parse(r, g.cfg)
+	if clientIP != "" {
+		pr.ClientIP = clientIP
+		r = chainRequest(r, clientIP)
+	}
 	pr.Tenant, pr.IsSubPath = tenant, true
 	if pr.Token == "" {
 		pr.Token = tokenFromSubscribePath(pr)

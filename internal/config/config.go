@@ -22,7 +22,10 @@ type Config struct {
 	// 保留字段用于解析旧配置时给个明确报错提示(见 validate)。
 	Paths          Paths       `yaml:"paths,omitempty"`
 	Detector       DetectorCfg `yaml:"detector"`
-	IngressProxies []string    `yaml:"-"` // immediate peers allowed to enter the subscription gateway
+	IngressProxies []string    `yaml:"-"` // immediate peers in direct mode
+	IngressMode    string      `yaml:"-"`
+	NginxEgressIPs []string    `yaml:"-"`
+	NginxClientIP  bool        `yaml:"-"`
 	DisableLumi    bool        `yaml:"-"` // database setting; enabled by default for compatibility
 	ReportBaseURL  string      `yaml:"-"` // public URL for generated reporting instructions
 	Admin          AdminCfg    `yaml:"admin"`

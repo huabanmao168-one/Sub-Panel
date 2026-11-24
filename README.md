@@ -54,12 +54,15 @@ curl -fsSL https://raw.githubusercontent.com/huabanmao168-one/Sub-Panel/main/ins
 
 账号为 `admin`；随机初始密码保存在 `/opt/Sub-Panel/data/sub-panel.db.initial-password`（权限 `0600`），安装脚本和服务日志不会打印密码。首次登录后请在「设置」修改密码，修改成功后清理初始密码文件。全新安装也会生成上报密钥；升级保留旧实例的监听配置和凭据。
 
-## 常用命令
+## 管理菜单与常用命令
+
+通过安装脚本安装或升级后，在终端输入 `sub-panel` 打开管理菜单，可查看状态、重启、启动、停止和查看最近日志。需要管理员权限的操作会调用 `sudo`。若终端的 `PATH` 未包含 `/usr/local/bin`，使用 `/usr/local/bin/sub-panel`。
 
 ```bash
-systemctl status  sub-panel       # 状态
-systemctl restart sub-panel       # 重启
-journalctl -u sub-panel -f        # 实时日志
+sub-panel                         # 打开管理菜单
+sub-panel status                  # 查看状态
+sub-panel restart                 # 重启服务
+sub-panel logs -f                 # 实时日志（Ctrl+C 结束）
 
 bash /opt/Sub-Panel/uninstall.sh           # 卸载(保留 config + data)
 bash /opt/Sub-Panel/uninstall.sh --purge   # 完全卸载
@@ -84,9 +87,13 @@ bash /opt/Sub-Panel/uninstall.sh --purge   # 完全卸载
 
 如果改监听后管理面不可达，停止服务后运行 `/opt/Sub-Panel/sub-panel restore-settings`（自定义库时追加 `-db <路径>`），再启动服务。该命令只恢复上一份系统设置，不回滚密码、机场、名单或日志。[改造及验收记录](docs/refactor-audit.md)。
 
-## 配置前置 Nginx
+## 配置前置代理
 
-订阅与 `/r/` 上报入口只接受来自「设置 → 系统配置 → 前置 Nginx 来源 IP 或 CIDR」的 TCP 对端，默认 `127.0.0.1` 与 `::1`。白名单和应急透传不会绕过该检查；`/healthz` 只用于健康检查，不统计。后台管理端不受此规则影响。
+在「设置 → 系统配置 → 订阅入口模式」选择链路。入口校验覆盖订阅和 `/r/` 上报；白名单和应急透传不会绕过它。`/healthz` 不计入统计，管理端不受此规则影响。
+
+### 直连前置代理
+
+网关只接受配置中的 TCP 对端，默认 `127.0.0.1` 与 `::1`。
 
 - **同机部署**：让 Nginx 反代 `http://127.0.0.1:18443`。已有实例可在设置中将订阅监听地址改为回环，重启后生效。
 - **跨机或 Docker**：在管理面填入网关实际看到的 Nginx 来源地址（可能是容器网桥或 NAT 出口），保存后重启。若网关监听非回环地址，请用防火墙限制端口只对 Nginx 开放，不要将整个公网或不受信网络放入允许列表。该校验识别连接地址，不能区分同一可信主机上不同进程。
@@ -100,6 +107,13 @@ location / {
     proxy_set_header X-Forwarded-For $remote_addr;
 }
 ```
+
+### 用户 → 国内 Nginx → Cloudflare → Sub-Panel
+
+1. 选择对应模式，填写 **国内 Nginx 连接 Cloudflare 时的公网出口 IPv4 / IPv6**，每行一个，保存后重启。不要填 Cloudflare IP、Nginx 的内网地址或域名。如果 Nginx 的公网出口变更，需要更新这里；Cloudflare 网段则由程序维护。
+2. 程序启动后及每 6 小时从 Cloudflare 官方 API 获取 IPv4/IPv6 回源网段。最新有效名单缓存在 SQLite；同步失败不会清空当前名单，新装无缓存时才用程序附带的初始名单。
+3. 网关先校验 TCP 对端在 Cloudflare 官方网段内，再检查由 Cloudflare 设置的 `CF-Connecting-IP` 是否等于某个 Nginx 出口地址。条件未通过的请求不计数。此模式适用于 Cloudflare 普通代理直接回源到 Sub-Panel；如果使用 Tunnel、另一层本机代理、会修改该头的 Worker 或 Pseudo IPv4 覆盖模式，看到的地址会变化，不能直接按这条链配置。
+4. 如果要按**原始用户 IP**统计和风控，在国内 Nginx 对应的反代 `location` 里配置 `proxy_set_header X-Sub-Panel-Client-IP $remote_addr;`（必须覆盖传入的同名头），再在设置开启「使用国内 Nginx 写入的原始用户 IP」，保存并重启。不启用或缺少有效头时，日志使用 Nginx 的出口 IP；多个用户会共享该 IP，可能影响 IP 频次规则。若 Nginx 前还有一层代理，先正确设置 Nginx 的可信真实 IP 提取。
 
 首次启用可信入口时，概览、请求日志与异常统计从该次升级时刻开始计算。旧记录不删除；因为之前没有可信的来源信息，不再混入当前面板统计。
 

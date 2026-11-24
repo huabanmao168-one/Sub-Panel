@@ -458,15 +458,23 @@
             <fieldset id="runtimeFields" disabled>
               <fieldset class="runtime-group">
                 <legend>监听与真实 IP</legend>
-                <p class="muted">前置 Nginx 来源按 TCP 对端地址校验；未列出的来源无法访问订阅或上报，也不进入统计。跨机部署时，请填写网关实际看到的 Nginx 出口地址。</p>
+                <p class="muted">来源校验同时适用于订阅和上报；不符合所选入口模式的请求不会进入统计。</p>
                 <div class="form-grid">
                   <label>订阅监听地址<input name="listen" required placeholder="0.0.0.0:18443"></label>
                   <label>管理监听地址<input name="admin_listen" required placeholder="127.0.0.1:19090"></label>
                   <label>外部上报基址（可选）<input name="report_base_url" type="url" placeholder="https://sub.example.com"></label>
-                  <label>前置 Nginx 来源 IP 或 CIDR<textarea name="ingress_proxies" rows="3" required placeholder="每行一项，例如 127.0.0.1"></textarea></label>
+                  <label>订阅入口模式<select name="ingress_mode"><option value="direct">直连前置代理</option><option value="nginx_cloudflare">国内 Nginx → Cloudflare → Sub-Panel</option></select></label>
+                </div>
+                <div id="ingressDirectFields" class="form-grid">
+                  <label>前置代理 TCP 来源 IP 或 CIDR<textarea name="ingress_proxies" rows="3" required placeholder="每行一项，例如 127.0.0.1"></textarea></label>
                   <label>真实 IP 请求头的可信代理<textarea name="trust_proxies" rows="3" placeholder="每行一项，例如 127.0.0.1"></textarea></label>
                   <label>真实 IP 请求头（按顺序）<textarea name="trust_headers" rows="3" placeholder="每行一项"></textarea></label>
-                  <label><input type="checkbox" name="cloudflare"> 同时信任 Cloudflare 官方 IP 段</label>
+                  <label><input type="checkbox" name="cloudflare"> 解析真实 IP 时也信任 Cloudflare 官方 IP 段</label>
+                </div>
+                <div id="ingressChainFields" class="form-grid" hidden>
+                  <label>国内 Nginx 公网出口 IP<textarea name="nginx_egress_ips" rows="3" placeholder="每行一个固定的 IPv4 或 IPv6 出口地址"></textarea></label>
+                  <label><input type="checkbox" name="nginx_client_ip"> 使用国内 Nginx 写入的原始用户 IP</label>
+                  <p class="muted">程序定期同步 Cloudflare 官方回源网段，不用手填。仅在 TCP 对端属于 Cloudflare、且 Cloudflare 标记的请求来源为上述 Nginx 时放行。勾选原始用户 IP 前，须在 Nginx 覆盖设置 <code>proxy_set_header X-Sub-Panel-Client-IP $remote_addr;</code>。未提供有效值时，使用 Nginx 出口 IP。</p>
                 </div>
               </fieldset>
               <fieldset class="runtime-group">

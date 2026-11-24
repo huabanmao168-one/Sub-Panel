@@ -7,6 +7,7 @@ REPO="huabanmao168-one/Sub-Panel"
 INSTALL_DIR="/opt/Sub-Panel"
 SERVICE_NAME="sub-panel.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+MENU_FILE="/usr/local/bin/sub-panel"
 XDB_URL="https://raw.githubusercontent.com/lionsoul2014/ip2region/f1781b7f9b7a17c96246433d83804404f0a22120/data/ip2region_v4.xdb"
 XDB_SHA256="a29fb3e8b204dfdf45b9bc082e12845b5eaac18cd467849d2888baa9fde383c8"
 
@@ -161,6 +162,10 @@ case "${1:-}" in ''|--purge) ;; *) echo '用法: uninstall.sh [--purge]' >&2; ex
 systemctl disable --now sub-panel.service
 rm -f -- /etc/systemd/system/sub-panel.service
 systemctl daemon-reload
+menu=/usr/local/bin/sub-panel
+if [[ -f "$menu" && ! -L "$menu" ]] && grep -Fxq '# Managed by the Sub-Panel installer' "$menu"; then
+  rm -f -- "$menu"
+fi
 if [[ "${1:-}" == '--purge' ]]; then
   rm -rf -- /opt/Sub-Panel
   echo '已卸载并删除 /opt/Sub-Panel；外置数据和 systemd drop-in 未删除。'
@@ -171,6 +176,65 @@ fi
 UNINST
 replace_file "$tmp/uninstall.sh" "$INSTALL_DIR/uninstall.sh" 0755
 
+cat > "$tmp/sub-panel-menu" <<'MENU'
+#!/usr/bin/env bash
+# Managed by the Sub-Panel installer
+set -uo pipefail
+service=sub-panel.service
+app=/opt/Sub-Panel/sub-panel
+
+admin() {
+  if (( EUID == 0 )); then
+    "$@"
+  elif command -v sudo >/dev/null; then
+    sudo "$@"
+  else
+    printf '此操作需要管理员权限，请以 root 运行。\n' >&2
+    return 1
+  fi
+}
+
+status() { systemctl status --no-pager "$service"; }
+logs() { journalctl --unit "$service" --lines 50 --no-pager "$@"; }
+control() {
+  local action=$1
+  if admin systemctl "$action" "$service"; then
+    printf '操作已执行。可用 sub-panel status 查看状态。\n'
+  else
+    printf '操作失败。请检查服务状态或日志。\n' >&2
+    return 1
+  fi
+}
+
+case "${1:-menu}" in
+  menu) ;;
+  status) status; exit $? ;;
+  start|stop|restart) control "$1"; exit $? ;;
+  logs) shift; logs "$@"; exit $? ;;
+  *) exec "$app" "$@" ;;
+esac
+
+if [[ ! -t 0 || ! -t 1 ]]; then
+  printf '交互菜单需要终端。也可直接运行：sub-panel status|start|stop|restart|logs\n' >&2
+  exit 2
+fi
+while :; do
+  printf '\nSub-Panel 管理菜单\n'
+  printf '  1. 查看运行状态\n  2. 重启服务\n  3. 启动服务\n  4. 停止服务\n  5. 查看最近日志\n  0. 退出\n'
+  read -r -p '请选择：' choice || exit 0
+  case "$choice" in
+    1) status ;;
+    2) control restart ;;
+    3) control start ;;
+    4) control stop ;;
+    5) logs ;;
+    0|q|Q) exit 0 ;;
+    *) printf '无效选项，请重新输入。\n' ;;
+  esac
+done
+MENU
+bash -n "$tmp/sub-panel-menu"
+
 systemctl daemon-reload
 systemctl restart "$SERVICE_NAME" || die "启动失败，请查看 journalctl -u $SERVICE_NAME -n 50 --no-pager"
 for _ in 1 2 3 4 5; do
@@ -179,6 +243,15 @@ for _ in 1 2 3 4 5; do
 done
 systemctl enable "$SERVICE_NAME" >/dev/null
 if (( ! legacy )); then touch "$INSTALL_DIR/data/.sqlite-bootstrap"; fi
+if [[ ! -e "$MENU_FILE" && ! -L "$MENU_FILE" ]] || { [[ -f "$MENU_FILE" && ! -L "$MENU_FILE" ]] && grep -Fxq '# Managed by the Sub-Panel installer' "$MENU_FILE"; }; then
+  if mkdir -p -- /usr/local/bin && replace_file "$tmp/sub-panel-menu" "$MENU_FILE" 0755; then
+    log "输入 sub-panel 打开管理菜单（或运行 $MENU_FILE）。"
+  else
+    warn "服务已启动，但无法安装管理菜单 $MENU_FILE。"
+  fi
+else
+  warn "$MENU_FILE 已存在，不覆盖其他来源的同名命令。"
+fi
 log "${tag} 安装完成；管理面地址见 journalctl -u $SERVICE_NAME（管理面监听中）"
 if [[ -f "$INSTALL_DIR/data/sub-panel.db.initial-password" ]]; then
   log '新装管理面默认只监听 127.0.0.1:19090，建议通过 SSH 端口转发访问。'

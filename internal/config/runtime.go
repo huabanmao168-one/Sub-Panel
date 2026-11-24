@@ -41,6 +41,9 @@ type RuntimeSettings struct {
 	Listen             string   `json:"listen"`
 	AdminListen        string   `json:"admin_listen"`
 	IngressProxies     []string `json:"ingress_proxies"`
+	IngressMode        string   `json:"ingress_mode"`
+	NginxEgressIPs     []string `json:"nginx_egress_ips"`
+	NginxClientIP      bool     `json:"nginx_client_ip"`
 	TrustHeaders       []string `json:"trust_headers"`
 	TrustProxies       []string `json:"trust_proxies"`
 	Cloudflare         bool     `json:"cloudflare"`
@@ -59,6 +62,7 @@ type RuntimeSettings struct {
 func (c *Config) RuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
 		Listen: c.Listen, AdminListen: c.AdminListen, IngressProxies: c.AllowedIngressPeers(),
+		IngressMode: c.IngressProfile(), NginxEgressIPs: append([]string{}, c.NginxEgressIPs...), NginxClientIP: c.NginxClientIP,
 		TrustHeaders: append([]string{}, c.RealIP.TrustHeaders...), TrustProxies: append([]string{}, c.RealIP.TrustProxies...), Cloudflare: c.RealIP.Cloudflare, GeoIPPath: c.GeoIP.XDBPath,
 		EventRetention: c.Storage.Retention.Events.Std().String(), IncidentRetention: c.Storage.Retention.Incidents.Std().String(),
 		BatchFlushInterval: c.Storage.BatchFlushInterval.Std().String(), BatchFlushSize: c.Storage.BatchFlushSize,
@@ -101,7 +105,20 @@ func (c Config) WithRuntimeSettings(s RuntimeSettings) (*Config, error) {
 		*item.target = Duration(d)
 	}
 	// Missing fields from older UI/API clients leave the current ingress policy intact.
-	if s.IngressProxies == nil {
+	if s.IngressMode == "" {
+		s.IngressMode, s.NginxEgressIPs, s.NginxClientIP = c.IngressProfile(), c.NginxEgressIPs, c.NginxClientIP
+	}
+	switch s.IngressMode {
+	case IngressDirect:
+	case IngressNginxCloudflare:
+		if _, err := ParseNginxEgressIPs(s.NginxEgressIPs); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("未知的订阅入口模式")
+	}
+	c.IngressMode, c.NginxEgressIPs, c.NginxClientIP = s.IngressMode, append([]string(nil), s.NginxEgressIPs...), s.NginxClientIP
+	if s.IngressProxies == nil || (s.IngressMode == IngressNginxCloudflare && len(s.IngressProxies) == 0) {
 		s.IngressProxies = c.AllowedIngressPeers()
 	}
 	if len(s.IngressProxies) == 0 {

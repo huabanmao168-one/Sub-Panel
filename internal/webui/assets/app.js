@@ -867,7 +867,16 @@ $('#cloudCheckIP').addEventListener('keydown', e => {
 const runtimeForm = $('#runtimeSettingsForm');
 const runtimeFields = $('#runtimeFields');
 const runtimeStatus = $('#runtimeStatus');
+const ingressMode = runtimeForm.elements.namedItem('ingress_mode');
 let runtimeBusy = false;
+function updateIngressFields() {
+  const chain = ingressMode.value === 'nginx_cloudflare';
+  $('#ingressDirectFields').hidden = chain;
+  $('#ingressChainFields').hidden = !chain;
+  runtimeForm.elements.namedItem('ingress_proxies').required = !chain;
+  runtimeForm.elements.namedItem('nginx_egress_ips').required = chain;
+}
+ingressMode.addEventListener('change', updateIngressFields);
 function renderRuntimeSettings(result) {
   for (const [key, value] of Object.entries(result.saved)) {
     const field = runtimeForm.elements.namedItem(key);
@@ -875,8 +884,10 @@ function renderRuntimeSettings(result) {
     if (field.type === 'checkbox') field.checked = value;
     else field.value = Array.isArray(value) ? value.join('\n') : value;
   }
+  updateIngressFields();
   runtimeStatus.dataset.state = result.restart_required ? 'pending' : 'active';
-  const addresses = ` 当前监听：订阅 ${result.active.listen}，管理 ${result.active.admin_listen}。`;
+  const mode = result.active.ingress_mode === 'nginx_cloudflare' ? 'Nginx → Cloudflare → Sub-Panel' : '直连前置代理';
+  const addresses = ` 当前监听：订阅 ${result.active.listen}，管理 ${result.active.admin_listen}。当前入口：${mode}。`;
   runtimeStatus.textContent = (result.restart_required ? '已保存，等待重启。' : '数据库配置已生效。') + addresses;
 }
 async function loadSettings() {
