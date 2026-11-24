@@ -1,5 +1,5 @@
-# Sub-Panel 默认配置(由 install.sh 复制到 /opt/Sub-Panel/config.yml)
-# 注释里 ${VAR} 仅作说明用,YAML 本身不展开变量。
+# 旧版 YAML 示例，仅供迁移参考。新安装由 SQLite 初始化，不使用本文件。
+# 迁移完成后请从管理面修改配置，不再编辑 YAML。
 
 listen: "0.0.0.0:18443"          # 反代监听端口(对外订阅入口)
 admin_listen: "0.0.0.0:19090"    # 管理面监听端口
@@ -42,7 +42,7 @@ admin:
 # 租户(订阅前置)。可以在管理面 → 租户管理 增删
 tenants: []
 
-# 检测规则(可在管理面 → 检测规则 查看,阈值需改本文件后重启)
+# 旧版检测规则示例；当前阈值在「触发规则」页面修改。
 detector:
   observe_only: false
   windows:

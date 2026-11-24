@@ -129,6 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_resolved_tenant_ts ON resolved_tokens(tenant, res
 
 // Event 一行请求记录。
 type Event struct {
+	ID         int64 `json:"-"`
 	TS         time.Time
 	Tenant     string
 	ClientIP   string
@@ -146,8 +147,7 @@ type Event struct {
 	ISP        string // 电信/阿里/Cloudflare/...
 }
 
-// Incident 命中规则的事件。Severity/Action 字段已废弃,DB 列保留向后兼容,
-// 写入时给空值,读取时不再展示。
+// Incident records requests rejected by a subscription risk policy.
 type Incident struct {
 	TS        time.Time
 	Tenant    string
@@ -155,7 +155,7 @@ type Incident struct {
 	ClientIP  string
 	TokenHash string
 	RuleTags  []string
-	Action    string // 已废弃,固定为空
+	Action    string // deny for rejected subscription requests
 	Note      string
 }
 
@@ -184,8 +184,13 @@ type Store struct {
 }
 
 func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) {
+	return OpenConfigured(path, func(*Store) (time.Duration, int, error) { return flushEvery, flushSize, nil })
+}
+
+// OpenConfigured loads persistent settings before starting the asynchronous writer.
+func OpenConfigured(path string, settings func(*Store) (time.Duration, int, error)) (*Store, error) {
 	// 启用 WAL,journal_mode 必须在 connect 后设置一次
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)")
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=secure_delete(ON)")
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +198,7 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(time.Hour)
-	if _, err := db.Exec(schema); err != nil {
+	if err := initSchema(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
@@ -264,9 +269,16 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 		db:         db,
 		eventCh:    make(chan Event, 1024),
 		incidentCh: make(chan Incident, 256),
-		flushSize:  flushSize,
-		flushEvery: flushEvery,
 		stopCh:     make(chan struct{}),
+	}
+	s.flushEvery, s.flushSize, err = settings(s)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if s.flushEvery <= 0 || s.flushSize <= 0 {
+		_ = db.Close()
+		return nil, fmt.Errorf("invalid log writer settings")
 	}
 	s.wg.Add(1)
 	go s.writer()
@@ -479,6 +491,8 @@ type EventFilter struct {
 	UA        string // User-Agent 模糊匹配(LIKE)
 	Since     time.Time
 	Until     time.Time
+	BeforeTS  time.Time
+	BeforeID  int64
 	Limit     int
 	Offset    int
 	// IncludeResolved 为 true 时不过滤已处理 token;默认 false。
@@ -488,8 +502,8 @@ type EventFilter struct {
 }
 
 func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
-	q := `SELECT ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size
-		FROM events WHERE 1=1`
+	q := `SELECT id,ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,
+		COALESCE(country,''),COALESCE(usage_type,''),COALESCE(isp,'') FROM events WHERE 1=1`
 	args := []any{}
 	if f.Tenant != "" {
 		q += " AND tenant=?"
@@ -523,16 +537,15 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		q += " AND ts<=?"
 		args = append(args, f.Until.UnixMilli())
 	}
-	// 默认排除已处理 token;单 token 精确查询时不过滤(用户显式要看)。
-	if !f.IncludeResolved && f.TokenHash == "" {
-		if f.Tenant != "" {
-			q += " AND token_hash NOT IN (SELECT token FROM resolved_tokens WHERE tenant=? OR tenant='')"
-			args = append(args, f.Tenant)
-		} else {
-			q += " AND token_hash NOT IN (SELECT token FROM resolved_tokens)"
-		}
+	if f.BeforeID > 0 {
+		q += " AND (ts,id) < (?,?)"
+		args = append(args, f.BeforeTS.UnixMilli(), f.BeforeID)
 	}
-	q += " ORDER BY ts DESC"
+	// A tenant-specific resolution must not hide the same token in another tenant.
+	if !f.IncludeResolved && f.TokenHash == "" {
+		q += " AND NOT EXISTS (SELECT 1 FROM resolved_tokens r WHERE r.token=events.token_hash AND (r.tenant='' OR r.tenant=events.tenant))"
+	}
+	q += " ORDER BY ts DESC,id DESC"
 	if f.Limit <= 0 || f.Limit > 1000 {
 		f.Limit = 100
 	}
@@ -550,8 +563,8 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		var ts int64
 		var tags sql.NullString
 		var ua, tokenHash, flag, path, action sql.NullString
-		if err := rows.Scan(&ts, &e.Tenant, &e.ClientIP, &ua, &tokenHash, &flag,
-			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Tenant, &e.ClientIP, &ua, &tokenHash, &flag,
+			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize, &e.Country, &e.UsageType, &e.ISP); err != nil {
 			return nil, err
 		}
 		e.TS = time.UnixMilli(ts)
@@ -740,7 +753,6 @@ type Stats struct {
 	TotalEvents     int64            `json:"total_events"`
 	PassCount       int64            `json:"pass"`
 	SlowCount       int64            `json:"slow"`
-	FakeCount       int64            `json:"fake"`
 	DenyCount       int64            `json:"deny"`
 	UniqueIPs       int64            `json:"unique_ips"`
 	UniqueTokens    int64            `json:"unique_tokens"`
@@ -784,14 +796,12 @@ func (s *Store) Summary(ctx context.Context, tenant string, since time.Time) (*S
 			return nil, err
 		}
 		switch a {
-		case "pass":
-			out.PassCount = n
+		case "pass", "display":
+			out.PassCount += n
 		case "slow":
 			out.SlowCount = n
-		case "fake":
-			out.FakeCount = n
-		case "deny":
-			out.DenyCount = n
+		case "deny", "lumi_failed", "display_failed":
+			out.DenyCount += n
 		}
 	}
 	rows.Close()
@@ -1431,9 +1441,9 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		args = append(args, tenant)
 	}
 	rows, err := s.db.Query(`
-		SELECT token_hash, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
+		SELECT tenant, token_hash, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
 		FROM events WHERE ts>=?`+tenantCond+`
-		GROUP BY token_hash`, args...)
+		GROUP BY tenant, token_hash`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1444,19 +1454,26 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		distinctIPs int
 		distinctUAs int
 	}
-	statsMap := make(map[string]evStats, len(reports))
+	type reportKey struct{ tenant, token string }
+	statsMap := make(map[reportKey]evStats, len(reports))
 	for rows.Next() {
-		var token string
+		var key reportKey
 		var st evStats
-		if err := rows.Scan(&token, &st.pullCount, &st.distinctIPs, &st.distinctUAs); err != nil {
-			continue
+		if err := rows.Scan(&key.tenant, &key.token, &st.pullCount, &st.distinctIPs, &st.distinctUAs); err != nil {
+			return nil, err
 		}
-		statsMap[token] = st
+		statsMap[key] = st
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	out := make([]SuspectRow, 0, len(reports))
 	for _, r := range reports {
-		st := statsMap[r.Token]
+		st, ok := statsMap[reportKey{r.Tenant, r.Token}]
+		if !ok {
+			continue
+		}
 		pullCount := st.pullCount
 		distinctIPs := st.distinctIPs
 		distinctUAs := st.distinctUAs

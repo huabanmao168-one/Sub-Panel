@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -22,7 +23,6 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
-	"github.com/huabanmao168/SubPanel/internal/faker"
 	"github.com/huabanmao168/SubPanel/internal/parser"
 	"github.com/huabanmao168/SubPanel/internal/rewrite"
 	"github.com/huabanmao168/SubPanel/internal/store"
@@ -35,13 +35,11 @@ type Gateway struct {
 	st     *store.Store
 	bans   *banlist.List
 	det    *detector.Detector
-	faker  *faker.Renderer
-	rng    *rand.Rand
 	// passthroughAll 一键透传:网关入口短路直接透传,不进任何规则/黑白名单。
 	passthroughAll atomic.Bool
-	// autoBan 字段已删除:命中规则统一投毒,无自动封禁逻辑。
-	requests atomic.Uint64
-	logger   *slog.Logger
+	ingressPeers   []netip.Prefix
+	requests       atomic.Uint64
+	logger         *slog.Logger
 
 	// 可选:GeoIP 查询,用于把 country/usage_type/isp 落进请求日志
 	// nil 时三个字段留空,不影响其他流程
@@ -50,7 +48,7 @@ type Gateway struct {
 	// 可选:云厂商 IP 命中查询(给全局黑名单"云厂商一键"用)
 	cloudLookup func(ip string) (bool, string)
 
-	// 可选:全局黑名单(海外/云/ISP/浏览器),命中即投毒,优先级高于触发规则
+	// 可选:全局黑名单(海外/云/ISP/浏览器),命中拒绝，优先级高于触发规则
 	bl *blacklist.Manager
 
 	// 可选:IP 白名单查询(优先级最高,命中直接放行,跳过黑名单/触发规则)
@@ -109,22 +107,15 @@ type tenantSnap struct {
 	proxies map[string]*httputil.ReverseProxy
 }
 
-// AutoBanCfg 已废弃:删等级后无"红色自动封禁",banlist 仅手工维护。
-// 仅保留空类型避免外部引用立即编译失败,后续可清除。
-type AutoBanCfg struct{}
-
 func NewGateway(
 	cfg *config.Config, hasher *token.Hasher, st *store.Store, bans *banlist.List,
-	det *detector.Detector, fk *faker.Renderer,
-	autoBan AutoBanCfg, logger *slog.Logger,
+	det *detector.Detector, logger *slog.Logger,
 ) (*Gateway, error) {
-	_ = autoBan
-	g := &Gateway{
-		cfg: cfg, hasher: hasher, st: st, bans: bans, det: det,
-		faker:  fk,
-		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
-		logger: logger,
+	peers, err := config.ParseIngressPeers(cfg.AllowedIngressPeers())
+	if err != nil {
+		return nil, err
 	}
+	g := &Gateway{cfg: cfg, hasher: hasher, st: st, bans: bans, det: det, logger: logger, ingressPeers: peers}
 	if err := g.Reload(cfg.Tenants); err != nil {
 		return nil, err
 	}
@@ -151,14 +142,13 @@ func buildProxy(t config.Tenant, logger *slog.Logger) (*httputil.ReverseProxy, e
 		req.Host = host
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Warn("上游请求失败", "err", err, "host", r.Host)
+		logger.Warn("上游请求失败", "error_type", fmt.Sprintf("%T", err), "host", r.Host)
 		http.Error(w, "上游服务不可用", http.StatusBadGateway)
 	}
 	return rp, nil
 }
 
-// Reload 用新的 tenants 列表原子重建反代 map,并同步回 g.cfg.Tenants。
-// 调用者(webui)校验过 host+path 唯一/字段合法后才进来。
+// Reload atomically publishes a new tenant routing snapshot.
 func (g *Gateway) Reload(tenants []config.Tenant) error {
 	proxies := make(map[string]*httputil.ReverseProxy, len(tenants))
 	for _, t := range tenants {
@@ -171,7 +161,6 @@ func (g *Gateway) Reload(tenants []config.Tenant) error {
 	cp := make([]config.Tenant, len(tenants))
 	copy(cp, tenants)
 	g.snap.Store(&tenantSnap{tenants: cp, proxies: proxies})
-	g.cfg.Tenants = cp
 	return nil
 }
 
@@ -220,41 +209,61 @@ func (g *Gateway) LookupTenant(urlPath string) (tenant *config.Tenant, pathMatch
 
 func (g *Gateway) Requests() uint64 { return g.requests.Load() }
 
-// ServeHTTP 是顶层 handler。
+// allowedIngress checks the connection peer, never forwarding headers.
+func (g *Gateway) allowedIngress(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	ip = ip.WithZone("").Unmap()
+	for _, peer := range g.ingressPeers {
+		if peer.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// RequireIngress protects non-subscription routes such as the reporting endpoint.
+func (g *Gateway) RequireIngress(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !g.allowedIngress(r.RemoteAddr) {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !g.allowedIngress(r.RemoteAddr) {
+		http.NotFound(w, r)
+		return
+	}
+	tenant, pathMatched := g.LookupTenant(r.URL.Path)
+	if tenant == nil || !pathMatched {
+		http.NotFound(w, r)
+		return
+	}
+
 	g.requests.Add(1)
 	start := time.Now()
-
 	pr := parser.Parse(r, g.cfg)
-	tenant, pathMatched := g.LookupTenant(r.URL.Path)
-	pr.Tenant = tenant
-	pr.IsSubPath = pathMatched
+	pr.Tenant, pr.IsSubPath = tenant, true
 	if pr.Token == "" {
 		pr.Token = tokenFromSubscribePath(pr)
 	}
+	tokenHash := g.hasher.Hash(pr.Token)
 
-	// 0) 一键透传:跳过所有规则/黑白名单,只要 tenant 匹配就透传(紧急回滚用)
-	if g.passthroughAll.Load() && pr.Tenant != nil && pr.IsSubPath {
-		tokenHash := g.hasher.Hash(pr.Token)
+	// Emergency passthrough bypasses risk rules, not ingress admission.
+	if g.passthroughAll.Load() {
 		g.transparentProxyWithLog(w, r, pr, tokenHash, []string{"passthrough_all"}, "pass", start)
 		return
 	}
-
-	// 1) tenant 不存在 → 404 (路径前缀不匹配,默认静默)
-	if pr.Tenant == nil {
-		http.Error(w, "404 page not found", http.StatusNotFound)
-		g.logEvent(pr, "", "deny", http.StatusNotFound, []string{"path_not_match"}, 0, int64(len("404 page not found\n")), start)
-		return
-	}
-
-	// 2) 非订阅路径 → 404,不透传(防止 V2board 其他端点经我们泄露)
-	if !pr.IsSubPath {
-		http.Error(w, "404 page not found", http.StatusNotFound)
-		g.logEvent(pr, "", "block_path", http.StatusNotFound, []string{"path_not_match"}, 0, int64(len("404 page not found\n")), start)
-		return
-	}
-
-	tokenHash := g.hasher.Hash(pr.Token)
 
 	// 2.5) IP 白名单优先级最高:命中即跳过 banlist/黑名单/触发规则,直接透传。
 	// 也不进 detector.Observe(避免影响频率统计)。
@@ -263,20 +272,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2.6) UA 黑名单:命中即投毒,不进 detector.Observe(不污染频率窗口)。
+	// UA blacklist hits are rejected before entering the rate window.
 	if g.uaBlacklisted != nil && g.uaBlacklisted(pr.UA) {
-		g.respondFake(w, r, pr, tokenHash, []string{"ua_blacklist"}, start)
+		g.denySubscription(w, pr, tokenHash, []string{"ua_blacklist"}, "", start)
 		return
 	}
 
-	// 3) banlist 检查(仅 IP,命中即投毒。token 黑名单已废弃,v2board 重置即可绕过)
+	// The manual banlist applies to IP addresses.
 	if banned, reason := g.bans.CheckIP(pr.ClientIP); banned {
-		g.respondFake(w, r, pr, tokenHash, []string{"banlist_ip:" + reason}, start)
+		g.denySubscription(w, pr, tokenHash, []string{"banlist_ip:" + reason}, "", start)
 		return
 	}
 
 	// 3.5) 全局黑名单(海外/云/ISP/浏览器)— 粗粒度规则,优先于触发规则。
-	// 命中即投毒,不进 detector.Observe(不污染频率窗口)。
+	// Hits are rejected before entering the rate window.
 	if g.bl != nil {
 		country, usageType, isp := g.geoFor(pr.ClientIP)
 		// xdb 返回的 country 字段是中文,需要 ISO 码就要单独存。这里把 country
@@ -292,7 +301,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		accept := r.Header.Get("Accept")
 		if hit, tag := g.bl.Evaluate(iso, country, usageType, isp, isCloud, accept, pr.UA); hit {
-			g.respondFake(w, r, pr, tokenHash, []string{tag}, start)
+			g.denySubscription(w, pr, tokenHash, []string{tag}, "", start)
 			return
 		}
 	}
@@ -303,24 +312,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 5) evaluate
 	res := g.det.Evaluate(pr.ClientIP, tokenHash, pr.UA)
 
-	// 6) 记 incident(如有命中)
 	if res.Hit {
-		g.st.SubmitIncident(store.Incident{
-			TS:        time.Now(),
-			Tenant:    pr.Tenant.Name,
-			ClientIP:  pr.ClientIP,
-			TokenHash: tokenHash,
-			RuleTags:  res.Tags,
-			Note:      res.Note,
-		})
+		g.denySubscription(w, pr, tokenHash, res.Tags, res.Note, start)
+		return
 	}
-
-	// 7) 执行:命中即投毒,未命中放行
-	if res.Hit {
-		g.respondFake(w, r, pr, tokenHash, res.Tags, start)
-	} else {
-		g.transparentProxyWithLog(w, r, pr, tokenHash, res.Tags, "pass", start)
-	}
+	g.transparentProxyWithLog(w, r, pr, tokenHash, res.Tags, "pass", start)
 }
 
 // 带日志的反代
@@ -330,7 +326,7 @@ func (g *Gateway) transparentProxyWithLog(
 ) {
 	// 该机场开了展示规则才缓冲改写;没开的机场完全走原有直通路径。
 	display := g.hasDisplayRule(pr.Tenant.Name)
-	if isLumiUA(pr.UA) {
+	if !g.cfg.DisableLumi && isLumiUA(pr.UA) {
 		g.transparentProxyLumiWithLog(w, r, pr, tokenHash, append(tags, "lumi_encrypt"), action, start, display)
 		return
 	}
@@ -365,7 +361,7 @@ func (g *Gateway) transparentProxyWithLog(
 		UA:         pr.UA,
 		TokenHash:  tokenHash,
 		Flag:       pr.Flag,
-		Path:       pr.Path,
+		Path:       logPath(pr),
 		Status:     rw.status,
 		Action:     action,
 		RuleTags:   tags,
@@ -398,6 +394,10 @@ func (g *Gateway) transparentProxyLumiWithLog(
 	r.Header.Del("Accept-Encoding")
 	bw := &bufferingWriter{header: http.Header{}, status: 200, body: &bytes.Buffer{}}
 	rp.ServeHTTP(bw, r)
+	if bw.overflow {
+		g.subscriptionTransformError(w, pr, tokenHash, "lumi_failed", "body_too_large", tags, start)
+		return
+	}
 
 	if bw.status < 200 || bw.status >= 300 {
 		for k, vs := range bw.header {
@@ -415,7 +415,8 @@ func (g *Gateway) transparentProxyLumiWithLog(
 	enc := strings.ToLower(strings.TrimSpace(bw.header.Get("Content-Encoding")))
 	decoded, decErr := decodeBody(rawBody, enc)
 	if decErr != nil {
-		decoded = rawBody
+		g.subscriptionTransformError(w, pr, tokenHash, "lumi_failed", "decode_failed", tags, start)
+		return
 	}
 	// 展示定制:加密前改写名称字段(只动展示名,不动连接参数)
 	if display {
@@ -437,13 +438,14 @@ func (g *Gateway) transparentProxyLumiWithLog(
 	}
 
 	for k, vs := range bw.header {
-		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+		if isBodyHeader(k) || strings.EqualFold(k, "Content-Encoding") {
 			continue
 		}
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encrypted)))
 	w.WriteHeader(http.StatusOK)
@@ -457,7 +459,7 @@ func (g *Gateway) transparentProxyLumiWithLog(
 		UA:         pr.UA,
 		TokenHash:  tokenHash,
 		Flag:       pr.Flag,
-		Path:       pr.Path,
+		Path:       logPath(pr),
 		Status:     200,
 		Action:     action,
 		RuleTags:   tags,
@@ -469,107 +471,58 @@ func (g *Gateway) transparentProxyLumiWithLog(
 	})
 }
 
-// respondFake:拉上游真订阅,把节点 host 改写成 RFC5737 黑洞 IP 后返回。
-// 上游失败(订阅过期/被封等)直接 502,日志 action=fake_failed。
-func (g *Gateway) respondFake(
-	w http.ResponseWriter, r *http.Request, pr *parser.Request,
-	tokenHash string, tags []string, start time.Time,
-) {
-	rp := g.snap.Load().proxies[pr.Tenant.Name]
-	if rp == nil {
-		http.Error(w, "无可用上游", http.StatusBadGateway)
-		g.logEvent(pr, tokenHash, "fake_failed", http.StatusBadGateway, append(tags, "no_proxy"), 0, 0, start)
-		return
-	}
-	// 标记 X-Forwarded-For
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		r.Header.Set("X-Forwarded-For", pr.ClientIP)
-	} else {
-		r.Header.Set("X-Forwarded-For", xff+", "+pr.ClientIP)
-	}
-	// 剥掉 Accept-Encoding,强制上游返回明文,否则 Poison 无法对 gzip 字节流做正则替换。
-	r.Header.Del("Accept-Encoding")
-	bw := &bufferingWriter{header: http.Header{}, status: 200, body: &bytes.Buffer{}}
-	rp.ServeHTTP(bw, r)
+func (g *Gateway) denySubscription(w http.ResponseWriter, pr *parser.Request, tokenHash string, tags []string, note string, start time.Time) {
+	const message = "Forbidden"
+	w.Header().Set("Cache-Control", "no-store")
+	http.Error(w, message, http.StatusForbidden)
+	g.logEvent(pr, tokenHash, "deny", http.StatusForbidden, tags, 0, int64(len(message)+1), start)
+	g.st.SubmitIncident(store.Incident{TS: start, Tenant: pr.Tenant.Name, ClientIP: pr.ClientIP,
+		TokenHash: tokenHash, Action: "deny", RuleTags: tags, Note: note})
+}
 
-	// 上游失败(非 2xx)直接透传错误,标 fake_failed
-	if bw.status < 200 || bw.status >= 300 {
-		for k, vs := range bw.header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(bw.status)
-		_, _ = w.Write(bw.body.Bytes())
-		g.logEvent(pr, tokenHash, "fake_failed", bw.status, append(tags, "upstream_bad"), time.Since(start).Milliseconds(), int64(bw.body.Len()), start)
-		return
+func isBodyHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "content-length", "content-range", "etag", "digest", "content-digest", "content-md5", "repr-digest":
+		return true
+	default:
+		return false
 	}
+}
 
-	// 投毒:host 改 RFC5737。先按 Content-Encoding 解压,改完再按原编码压回去。
-	rawBody := bw.body.Bytes()
-	enc := strings.ToLower(strings.TrimSpace(bw.header.Get("Content-Encoding")))
-	decoded, decErr := decodeBody(rawBody, enc)
-	if decErr != nil {
-		// 解压失败时退化为原样投毒(几乎不会命中,但兜底)
-		decoded = rawBody
-		enc = ""
-	}
-	poisoned := faker.Poison(decoded, bw.header.Get("Content-Type"))
-	if enc != "" {
-		if reEncoded, encErr := encodeBody(poisoned, enc); encErr == nil {
-			poisoned = reEncoded
-		} else {
-			// 压回失败:剥掉 Content-Encoding 头,以明文返回
-			bw.header.Del("Content-Encoding")
-		}
-	}
-
-	// 头透传(去掉 Content-Length,后面重写)
-	for k, vs := range bw.header {
-		if strings.EqualFold(k, "Content-Length") {
-			continue
-		}
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(poisoned)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(poisoned)
-
-	country, usageType, isp := g.geoFor(pr.ClientIP)
-	g.st.SubmitEvent(store.Event{
-		TS:         start,
-		Tenant:     pr.Tenant.Name,
-		ClientIP:   pr.ClientIP,
-		UA:         pr.UA,
-		TokenHash:  tokenHash,
-		Flag:       pr.Flag,
-		Path:       pr.Path,
-		Status:     200,
-		Action:     "fake",
-		RuleTags:   tags,
-		UpstreamMS: time.Since(start).Milliseconds(),
-		RespSize:   int64(len(poisoned)),
-		Country:    country,
-		UsageType:  usageType,
-		ISP:        isp,
-	})
+func (g *Gateway) subscriptionTransformError(w http.ResponseWriter, pr *parser.Request, tokenHash, action, reason string, tags []string, start time.Time) {
+	const message = "订阅处理失败"
+	w.Header().Set("Cache-Control", "no-store")
+	http.Error(w, message, http.StatusBadGateway)
+	g.logEvent(pr, tokenHash, action, http.StatusBadGateway, append(tags, reason), time.Since(start).Milliseconds(), int64(len(message)+1), start)
 }
 
 // bufferingWriter 拦截上游响应,buffer 在内存里方便改写。
+const maxTransformBody = 16 << 20
+
 type bufferingWriter struct {
-	header http.Header
-	status int
-	body   *bytes.Buffer
+	header   http.Header
+	status   int
+	body     *bytes.Buffer
+	overflow bool
 }
 
-func (b *bufferingWriter) Header() http.Header         { return b.header }
-func (b *bufferingWriter) WriteHeader(s int)           { b.status = s }
-func (b *bufferingWriter) Write(p []byte) (int, error) { return b.body.Write(p) }
+func (b *bufferingWriter) Header() http.Header { return b.header }
+func (b *bufferingWriter) WriteHeader(s int)   { b.status = s }
+func (b *bufferingWriter) Write(p []byte) (int, error) {
+	if b.overflow || len(p) > maxTransformBody-b.body.Len() {
+		b.overflow = true
+		return len(p), nil
+	}
+	return b.body.Write(p)
+}
 
-// handleDeny 已删除:命中规则统一投毒,banlist 命中也走投毒。
+// logPath records only the configured prefix, not user-supplied path fragments.
+func logPath(pr *parser.Request) string {
+	if pr.Tenant == nil || !pr.IsSubPath {
+		return ""
+	}
+	return pr.Tenant.SubscribePath
+}
 
 // logEvent 仅落库,不写响应。
 func (g *Gateway) logEvent(
@@ -585,7 +538,7 @@ func (g *Gateway) logEvent(
 	}
 	clientIP, ua, flag, path := "", "", "", ""
 	if pr != nil {
-		clientIP, ua, flag, path = pr.ClientIP, pr.UA, pr.Flag, pr.Path
+		clientIP, ua, flag, path = pr.ClientIP, pr.UA, pr.Flag, logPath(pr)
 	}
 	country, usageType, isp := g.geoFor(clientIP)
 	g.st.SubmitEvent(store.Event{
@@ -649,18 +602,29 @@ func decodeBody(body []byte, enc string) ([]byte, error) {
 			return nil, err
 		}
 		defer r.Close()
-		return io.ReadAll(r)
+		return readTransformBody(r)
 	case "deflate":
 		r := flate.NewReader(bytes.NewReader(body))
 		defer r.Close()
-		return io.ReadAll(r)
+		return readTransformBody(r)
 	default:
 		// br/zstd 等暂不支持
 		return nil, fmt.Errorf("unsupported encoding: %s", enc)
 	}
 }
 
-// encodeBody 按 enc 把投毒后的明文压回去。
+func readTransformBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxTransformBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxTransformBody {
+		return nil, fmt.Errorf("decoded subscription exceeds limit")
+	}
+	return body, nil
+}
+
+// encodeBody restores the original encoding after display rewriting.
 func encodeBody(body []byte, enc string) ([]byte, error) {
 	switch enc {
 	case "", "identity":

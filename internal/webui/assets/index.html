@@ -7,14 +7,15 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<div class="progress-bar" id="progressBar"></div>
+<div class="progress-bar" id="progressBar" aria-hidden="true"></div>
+<a class="skip-link" href="#main-content">跳到主内容</a>
 <div class="app">
 
   <!-- ============ 左侧导航 ============ -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar" aria-label="主要导航">
     <div class="brand">
       <div class="logo">S</div>
-      Sub-Panel
+      <span>Sub-Panel<small>订阅网关</small></span>
     </div>
 
     <div class="sidebar-section">监控</div>
@@ -43,6 +44,7 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
       UA 黑名单
     </a>
+    <div class="sidebar-section">订阅</div>
     <a class="navlink" data-tab="display-rules">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
       订阅展示
@@ -77,8 +79,8 @@
     <div class="user-box">
       <div class="avatar" id="userAvatar">A</div>
       <div>
-        <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.0</div>
+        <div class="user-name" id="userName">—</div>
+        <div class="user-role">管理员</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -87,12 +89,16 @@
   </aside>
 
   <!-- ============ 主区 ============ -->
-  <main class="main">
+  <main class="main" id="main-content" tabindex="-1">
     <div class="topbar">
-      <div class="page-title" id="pageTitle">概览</div>
+      <button id="navToggle" class="nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false">菜单</button>
+      <div class="page-heading">
+        <h1 class="page-title" id="pageTitle">概览</h1>
+        <p id="pageDescription">查看订阅请求量、风控结果和访问来源。</p>
+      </div>
       <div class="topbar-right">
-        <select id="tenantSel"></select>
-        <select id="windowSel">
+        <select id="tenantSel" aria-label="筛选机场"><option value="">全部机场</option></select>
+        <select id="windowSel" aria-label="筛选时间范围">
           <option value="1h">1 小时</option>
           <option value="6h">6 小时</option>
           <option value="24h" selected>24 小时</option>
@@ -112,12 +118,12 @@
         <div class="stat-cards" id="summaryCards"></div>
         <div class="row-2col">
           <div class="card">
-            <h3>请求量最高 IP</h3>
-            <table id="topIPs"><thead><tr><th>IP</th><th>地区</th><th>ISP</th><th style="text-align:right">请求数</th></tr></thead><tbody></tbody></table>
+            <h3>访问量最高的 IP</h3>
+            <div class="datatable"><table id="topIPs"><thead><tr><th>IP</th><th>地区</th><th>运营商</th><th class="numeric">请求数</th></tr></thead><tbody></tbody></table></div>
           </div>
           <div class="card">
-            <h3>请求量最高 订阅</h3>
-            <table id="topTokens"><thead><tr><th>Token</th><th style="text-align:right">请求数</th></tr></thead><tbody></tbody></table>
+            <h3>访问量最高的订阅</h3>
+            <div class="datatable"><table id="topTokens"><thead><tr><th>订阅标识</th><th class="numeric">请求数</th></tr></thead><tbody></tbody></table></div>
           </div>
         </div>
       </section>
@@ -146,15 +152,15 @@
           </details>
           <div class="filter-bar">
             <input id="evIP" placeholder="按 IP 过滤">
-            <input id="evToken" placeholder="按 Token 过滤">
+            <input id="evToken" type="search" aria-label="筛选订阅标识或原始 Token" placeholder="订阅标识或原始 Token">
             <input id="evUA" placeholder="按 UA 过滤">
             <select id="evAction">
               <option value="">所有动作</option>
               <option value="pass">放行</option>
-              <option value="fake">投毒</option>
-              <option value="deny">拒绝</option>
-              <option value="block_path">路径拦截</option>
-              <option value="fake_failed">投毒失败</option>
+              <option value="deny">拒绝（HTTP 403）</option>
+              <option value="lumi_failed">Lumi 订阅处理失败</option>
+              <option value="display">展示改写</option>
+              <option value="display_failed">展示处理失败</option>
             </select>
             <select id="evUsage" title="按 IP 用途筛选">
               <option value="">所有用途</option>
@@ -175,7 +181,8 @@
             <button class="primary" id="evQuery">查询</button>
             <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
           </div>
-          <div id="evList" class="ev-list"></div>
+          <div id="evList" class="ev-list" aria-live="polite"></div>
+          <button type="button" id="evMoreBtn" class="ev-more-btn" hidden>加载更多</button>
         </div>
       </section>
 
@@ -208,7 +215,7 @@
       <section id="tab-ip-bans" class="tab">
         <div class="card bl-card">
           <div class="card-header">
-            <h3>全局拦截开关 <span class="muted" style="font-weight:400;margin-left:8px;font-size:12px">命中即投毒,不进频率窗口</span></h3>
+            <h3>全局拦截开关 <span class="muted" style="font-weight:400;margin-left:8px;font-size:12px">命中直接拒绝，不计入频率窗口</span></h3>
             <div class="actions">
               <button class="primary" id="blSaveBtn">保存</button>
             </div>
@@ -272,7 +279,7 @@
             <input id="uaBlNote" placeholder="备注">
             <button class="primary" id="uaBlAddBtn">添加</button>
           </div>
-          <p class="muted">命中黑名单的 UA 直接投毒,不进触发规则。子串匹配(忽略大小写)。</p>
+          <p class="muted">命中黑名单的 UA 直接返回 HTTP 403，不进入触发规则。子串匹配（忽略大小写）。</p>
         </div>
         <div class="datatable">
           <table>
@@ -289,31 +296,28 @@
             <h3>订阅展示规则</h3>
             <div class="actions"><button class="primary" id="drAddBtn">新增规则</button></div>
           </div>
-          <p class="muted">按用户邮箱后缀匹配,命中后改写下发订阅里的机场名和节点名关键词。只对已添加规则的机场生效,查不到邮箱的用户不会命中。</p>
+          <p class="muted">按邮箱条件或全部订阅匹配；只改显示名称，不修改连接参数。</p>
+          <div class="datatable">
+            <table>
+              <thead><tr><th>规则名</th><th>机场</th><th>匹配条件</th><th>新机场名</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="drTbody"></tbody>
+            </table>
+          </div>
         </div>
-        <div class="datatable">
-          <table>
-            <thead><tr><th>规则名</th><th>机场</th><th>邮箱后缀</th><th>新机场名</th><th>状态</th><th></th></tr></thead>
-            <tbody id="drTbody"></tbody>
-          </table>
-        </div>
-        <div class="modal-overlay" id="drModal" style="display:none">
-          <div class="modal" style="width:680px">
-            <div class="modal-header"><h3 id="drModalTitle">新增规则</h3><button class="close-btn" id="drClose">×</button></div>
+        <div class="modal-overlay" id="drModal" hidden>
+          <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="drModalTitle" tabindex="-1">
+            <div class="modal-header"><h3 id="drModalTitle">新增规则</h3><button class="close-btn" id="drClose" aria-label="关闭弹窗">×</button></div>
             <div class="modal-body">
-              <div class="filter-bar">
-                <input id="drName" placeholder="规则名">
-                <select id="drTenant"></select>
+              <div class="form-grid runtime-group-grid">
+                <label>规则名<input id="drName" placeholder="例如：品牌名称更新"></label>
+                <label>机场<select id="drTenant"></select></label>
+                <label>匹配方式<select id="drMatchType"><option value="email_suffix">邮箱后缀</option><option value="email_exact">完整邮箱</option><option value="email_keyword">邮箱关键词</option><option value="all">该机场全部订阅</option></select></label>
+                <label id="drMatchRow">匹配值<input id="drMatchValue" placeholder="例如：example.com"></label>
+                <label>原机场名<input id="drAirportFrom" placeholder="留空按默认方式处理"></label>
+                <label>新机场名<input id="drAirportTo" placeholder="留空则不替换"></label>
               </div>
-              <div class="filter-bar">
-                <input id="drMatchValue" placeholder="邮箱后缀,如 auto.com">
-              </div>
-              <div class="filter-bar">
-                <input id="drAirportFrom" placeholder="原机场名">
-                <input id="drAirportTo" placeholder="新机场名">
-              </div>
-              <h3 style="margin:10px 0 6px">节点名关键词替换</h3>
-              <textarea id="drReps" rows="6" style="width:100%" placeholder="每行一条,格式:旧词=新词"></textarea>
+              <label class="textarea-label" for="drReps">节点名关键词替换</label>
+              <textarea id="drReps" rows="5" placeholder="每行一条：旧词=新词"></textarea>
               <div class="filter-bar">
                 <label><input type="checkbox" id="drEnabled" checked> 启用</label>
               </div>
@@ -356,7 +360,7 @@
             </div>
           </div>
           <p class="muted" style="margin:0 0 12px">
-            命中任意规则即视为非法访问,直接<strong>返回投毒订阅</strong>(改写节点 IP 到黑洞段)。规则保存后立即热生效,无需重启。
+            命中任意规则会<strong>直接返回 HTTP 403</strong>，不请求上游。规则保存后热加载。新规则的计数窗口通常不超过 24 小时；超过当前容量的设置不会保存。
           </p>
           <div class="datatable">
             <table>
@@ -376,7 +380,7 @@
           <div class="card-header">
             <h3>嫌疑用户</h3>
             <div class="actions">
-              <input id="suspectSearch" placeholder="搜索 token / 邮箱 / IP" style="width:200px">
+              <input id="suspectSearch" type="search" aria-label="搜索订阅标识、邮箱或 IP" placeholder="订阅标识 / 邮箱 / IP" style="width:200px">
               <select id="suspectWindow" style="width:auto">
                 <option value="24h">24 小时</option>
                 <option value="168h" selected>7 天</option>
@@ -399,12 +403,13 @@
 
       <!-- 设置 -->
       <section id="tab-settings" class="tab">
+        <div class="settings-grid">
         <div class="card">
-          <h3>上报密钥</h3>
-          <p class="muted" style="margin:0 0 8px">v2board 上报接口鉴权用,留空则不校验。修改后立即生效,同步更新各机场「接入代码」里的密钥。</p>
-          <div style="display:flex;gap:8px;align-items:center">
-            <input id="reportSecretInput" placeholder="留空 = 不校验" style="flex:1;max-width:360px">
-            <button class="primary" id="reportSecretSave">保存</button>
+          <h3>上报密钥 <span class="pill state-soft">即时生效</span></h3>
+          <p class="muted" style="margin:0 0 8px">用于 V2Board 上报接口鉴权，留空则不校验。修改立即生效；请手动更新各机场已部署的接入代码。</p>
+          <div class="inline-form">
+            <input id="reportSecretInput" type="password" autocomplete="off" aria-label="上报密钥" placeholder="留空即关闭校验" disabled>
+            <button class="primary" id="reportSecretSave" disabled>保存</button>
           </div>
         </div>
 
@@ -412,15 +417,15 @@
           <h3>修改管理员密码</h3>
           <div class="form-grid">
             <div>
-              <label>原密码</label>
+              <label for="pwOld">原密码</label>
               <input type="password" id="pwOld" autocomplete="current-password">
             </div>
             <div>
-              <label>新密码(至少 8 位)</label>
+              <label for="pwNew">新密码（8–72 字节）</label>
               <input type="password" id="pwNew" autocomplete="new-password">
             </div>
             <div>
-              <label>确认新密码</label>
+              <label for="pwNew2">确认新密码</label>
               <input type="password" id="pwNew2" autocomplete="new-password">
             </div>
             <div class="form-actions">
@@ -431,30 +436,61 @@
         </div>
 
         <div class="card" id="passthroughCard">
-          <h3>一键透传(紧急回滚)</h3>
-          <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px">
-            <label class="switch-wrap" style="display:flex;align-items:center;gap:8px;font-weight:500">
-              <input type="checkbox" id="passthroughToggle" style="width:auto;transform:scale(1.2)">
-              <span id="passthroughLabel">已关闭</span>
+          <h3>全局跳过风控 <span class="pill state-warning">应急</span></h3>
+          <div class="inline-form">
+            <label class="switch-wrap">
+              <input type="checkbox" id="passthroughToggle" aria-label="全局跳过风控" disabled>
+              <span id="passthroughLabel" role="status">状态未加载</span>
             </label>
-            <span class="pill" id="passthroughStatusPill" style="display:none">透传中</span>
+            <span class="pill state-warning" id="passthroughStatusPill" style="display:none">风控已跳过</span>
           </div>
           <p class="muted" style="margin:0">
-            开启后,所有请求<strong>跳过黑名单 / 触发规则 / IP 白名单 / 投毒</strong>,
-            只要路径前缀匹配就直接透传到上游。仅用于紧急回滚:疑似误伤大面积、上游出问题时临时打开。
-            事件日志里命中标签为<code>passthrough_all</code>,动作=放行。
+            只跳过黑白名单和触发规则，不绕过前置 Nginx 来源校验，也不关闭展示改写和 Lumi 兼容。
           </p>
         </div>
-
-        <div class="card">
-          <h3>检测规则(YAML 配置,只读)</h3>
-          <pre id="rulesPre" class="mono" style="background:#0f172a;color:#e2e8f0;padding:14px;border-radius:6px;overflow-x:auto;font-size:11.5px;line-height:1.5"></pre>
-          <p class="muted">规则阈值需要改 <code>config.yml</code> 后重启 sub-panel。UA / IP 白名单和黑名单可以在对应页面动态增删。</p>
         </div>
 
         <div class="card">
-          <h3>机场列表</h3>
-          <p class="muted" style="margin:0">机场增删改请到左侧「机场管理」页面操作,可直接热生效。</p>
+          <h3>系统配置 <span class="pill state-soft">重启生效</span></h3>
+          <p class="muted">保存到 SQLite；以下项目在服务重启后生效。机场、名单和触发规则请在各自页面修改。更改监听地址前，请确认端口可用且新的管理地址可达。</p>
+          <p id="runtimeStatus" class="status-banner" role="status">配置尚未加载。</p>
+          <form id="runtimeSettingsForm">
+            <fieldset id="runtimeFields" disabled>
+              <fieldset class="runtime-group">
+                <legend>监听与真实 IP</legend>
+                <p class="muted">前置 Nginx 来源按 TCP 对端地址校验；未列出的来源无法访问订阅或上报，也不进入统计。跨机部署时，请填写网关实际看到的 Nginx 出口地址。</p>
+                <div class="form-grid">
+                  <label>订阅监听地址<input name="listen" required placeholder="0.0.0.0:18443"></label>
+                  <label>管理监听地址<input name="admin_listen" required placeholder="127.0.0.1:19090"></label>
+                  <label>外部上报基址（可选）<input name="report_base_url" type="url" placeholder="https://sub.example.com"></label>
+                  <label>前置 Nginx 来源 IP 或 CIDR<textarea name="ingress_proxies" rows="3" required placeholder="每行一项，例如 127.0.0.1"></textarea></label>
+                  <label>真实 IP 请求头的可信代理<textarea name="trust_proxies" rows="3" placeholder="每行一项，例如 127.0.0.1"></textarea></label>
+                  <label>真实 IP 请求头（按顺序）<textarea name="trust_headers" rows="3" placeholder="每行一项"></textarea></label>
+                  <label><input type="checkbox" name="cloudflare"> 同时信任 Cloudflare 官方 IP 段</label>
+                </div>
+              </fieldset>
+              <fieldset class="runtime-group">
+                <legend>存储与 GeoIP</legend>
+                <div class="form-grid">
+                  <label>请求日志保留时间<input name="event_retention" required placeholder="168h"></label>
+                  <label>异常事件保留时间<input name="incident_retention" required placeholder="720h"></label>
+                  <label>批量写入间隔<input name="batch_flush_interval" required placeholder="1s"></label>
+                  <label>单批写入条数<input name="batch_flush_size" type="number" min="1" max="10000" required></label>
+                  <label>GeoIP 数据文件路径（留空禁用）<input name="geoip_path"></label>
+                </div>
+              </fieldset>
+              <fieldset class="runtime-group">
+                <legend>管理员与风控参数</legend>
+                <div class="form-grid">
+                  <label>管理员账号<input name="admin_username" required></label>
+                  <label>登录会话有效期<input name="session_ttl" required placeholder="12h"></label>
+                  <label><input type="checkbox" name="disable_lumi"> 停用 Lumi 订阅兼容处理</label>
+                  <label>仅跳过触发规则的 IP（不是全局白名单）<textarea name="detection_only_ips" rows="3" placeholder="每行一个 IP"></textarea></label>
+                </div>
+              </fieldset>
+              <button class="primary" type="submit">保存系统配置</button>
+            </fieldset>
+          </form>
         </div>
       </section>
 
@@ -481,33 +517,34 @@
           </div>
         </div>
       </section>
-    </main>
-  </div>
+    </div>
+  </main>
+</div>
 
 <!-- 机场新增/编辑 弹窗 -->
-<div class="modal-overlay" id="tenantModal" style="display:none">
-  <div class="modal" style="width:560px">
+<div class="modal-overlay" id="tenantModal" hidden>
+  <div class="modal modal-medium" role="dialog" aria-modal="true" aria-labelledby="tenantModalTitle" tabindex="-1">
     <div class="modal-header">
       <h3 id="tenantModalTitle">新增机场</h3>
-      <button class="close-btn" id="tenantModalClose">×</button>
+      <button class="close-btn" id="tenantModalClose" aria-label="关闭弹窗">×</button>
     </div>
     <div class="modal-body">
       <div class="form-row">
-        <label>机场名称 <span class="req">*</span></label>
+        <label for="tenantFormName">机场名称 <span class="req">*</span></label>
         <input id="tenantFormName" placeholder="cat / dog / acme,主键,唯一">
       </div>
       <div class="form-row">
-        <label>订阅路径 <span class="req">*</span></label>
+        <label for="tenantFormSubPath">订阅路径 <span class="req">*</span></label>
         <input id="tenantFormSubPath" placeholder="/api/v1/client/subscribe/cat" class="mono">
         <p class="hint">客户端访问的对外路径前缀,全局唯一。命中此前缀的请求转发到对应上游。</p>
       </div>
       <div class="form-row">
-        <label>上游地址 <span class="req">*</span></label>
+        <label for="tenantFormUpstream">上游地址 <span class="req">*</span></label>
         <input id="tenantFormUpstream" placeholder="http://127.0.0.1:17001" class="mono">
         <p class="hint">真实 V2Board 后端,只填 scheme + host[:port]。</p>
       </div>
       <div class="form-row">
-        <label>上游路径(可选)</label>
+        <label for="tenantFormUpPath">上游路径（可选）</label>
         <input id="tenantFormUpPath" placeholder="留空透传,如 /api/v1/client/subscribe" class="mono">
       </div>
       <div class="form-row">
@@ -523,17 +560,17 @@
 </div>
 
 <!-- 触发规则 新增/编辑 弹窗 -->
-<div class="modal-overlay" id="ruleModal" style="display:none">
-  <div class="modal rule-modal" style="width:760px">
+<div class="modal-overlay" id="ruleModal" hidden>
+  <div class="modal rule-modal" role="dialog" aria-modal="true" aria-labelledby="ruleModalTitle" tabindex="-1">
     <div class="modal-header">
       <h3 id="ruleModalTitle">新增规则</h3>
-      <button class="close-btn" id="ruleModalClose">×</button>
+      <button class="close-btn" id="ruleModalClose" aria-label="关闭弹窗">×</button>
     </div>
     <div class="modal-body">
 
       <div class="rule-grid rule-grid-2">
         <div class="form-row">
-          <label>规则名 <span class="req">*</span></label>
+          <label for="ruleFormName">规则名 <span class="req">*</span></label>
           <input id="ruleFormName" placeholder="token_freq_extreme" class="mono">
         </div>
         <div class="form-row">
@@ -546,7 +583,7 @@
       </div>
 
       <div class="form-row">
-        <label>描述</label>
+        <label for="ruleFormDesc">描述</label>
         <input id="ruleFormDesc" placeholder="一句话说清这条规则在防什么">
       </div>
 
@@ -554,34 +591,34 @@
       <div class="rule-cond-list">
         <div class="cond-row-v2">
           <span class="cond-name">单 token 频次</span>
-          <input type="number" min="0" id="ruleFormTfWin" placeholder="0">
+          <input type="number" min="0" id="ruleFormTfWin" aria-label="单订阅频次窗口（秒）" placeholder="0">
           <span class="cond-sep">秒内 ≥</span>
-          <input type="number" min="0" id="ruleFormTfGte" placeholder="0">
+          <input type="number" min="0" id="ruleFormTfGte" aria-label="单订阅频次阈值" placeholder="0">
           <span class="cond-unit">次</span>
         </div>
         <div class="cond-row-v2">
           <span class="cond-name">单 IP 频次</span>
-          <input type="number" min="0" id="ruleFormIfWin" placeholder="0">
+          <input type="number" min="0" id="ruleFormIfWin" aria-label="单 IP 频次窗口（秒）" placeholder="0">
           <span class="cond-sep">秒内 ≥</span>
-          <input type="number" min="0" id="ruleFormIfGte" placeholder="0">
+          <input type="number" min="0" id="ruleFormIfGte" aria-label="单 IP 频次阈值" placeholder="0">
           <span class="cond-unit">次</span>
         </div>
         <div class="cond-row-v2">
           <span class="cond-name">单 token 多 IP</span>
-          <input type="number" min="0" id="ruleFormTdWin" placeholder="0">
+          <input type="number" min="0" id="ruleFormTdWin" aria-label="单订阅多 IP 窗口（秒）" placeholder="0">
           <span class="cond-sep">秒内 ≥</span>
-          <input type="number" min="0" id="ruleFormTdGte" placeholder="0">
+          <input type="number" min="0" id="ruleFormTdGte" aria-label="单订阅不同 IP 数量阈值" placeholder="0">
           <span class="cond-unit">个 IP</span>
         </div>
         <div class="cond-row-v2">
           <span class="cond-name">单 IP 多 token</span>
-          <input type="number" min="0" id="ruleFormIdWin" placeholder="0">
+          <input type="number" min="0" id="ruleFormIdWin" aria-label="单 IP 多订阅窗口（秒）" placeholder="0">
           <span class="cond-sep">秒内 ≥</span>
-          <input type="number" min="0" id="ruleFormIdGte" placeholder="0">
+          <input type="number" min="0" id="ruleFormIdGte" aria-label="单 IP 不同订阅数量阈值" placeholder="0">
           <span class="cond-unit">个 token</span>
         </div>
       </div>
-      <p class="hint" style="margin:8px 0 14px">同一行两个值都 &gt; 0 才生效,任一为 0 该条件关闭。</p>
+      <p class="muted">每行的窗口与阈值须同时填写正数；两项留空或均为 0 则不启用该条件。</p>
 
       <details class="advanced">
         <summary>高级条件:云 IP / 地理 / ISP</summary>
@@ -622,15 +659,16 @@
 </div>
 
 <!-- 上报接入代码 弹窗 -->
-<div class="modal-overlay" id="reportCodeModal" style="display:none">
-  <div class="modal" style="width:680px">
+<div class="modal-overlay" id="reportCodeModal" hidden>
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="reportCodeTitle" tabindex="-1">
     <div class="modal-header">
       <h3 id="reportCodeTitle">上报接入代码</h3>
-      <button class="modal-close" id="reportCodeClose">&times;</button>
+      <button class="close-btn" id="reportCodeClose" aria-label="关闭弹窗">×</button>
     </div>
     <div class="modal-body">
       <div style="margin-bottom:14px">
         <label style="font-weight:600;font-size:13px">上报 URL</label>
+        <p class="muted" id="reportURLHint" hidden>此地址是推算值；如果经过 HTTPS 反代或使用独立域名，请先在设置中填写外部上报基址。</p>
         <div class="mono copyable" id="reportCodeURL" data-copy="" style="background:#f1f5f9;padding:8px 12px;border-radius:6px;word-break:break-all;cursor:pointer" title="点击复制"></div>
       </div>
       <div style="margin-bottom:14px">
@@ -647,7 +685,7 @@
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/static/app.js"></script>
 </body>

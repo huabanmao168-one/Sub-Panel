@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"io"
@@ -19,7 +17,6 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/banlist"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
-	"github.com/huabanmao168/SubPanel/internal/faker"
 	"github.com/huabanmao168/SubPanel/internal/parser"
 	"github.com/huabanmao168/SubPanel/internal/store"
 	"github.com/huabanmao168/SubPanel/internal/token"
@@ -73,7 +70,6 @@ func newE2E(t *testing.T, observe bool, extraRules ...config.Rule) (*Gateway, *h
 				},
 			}, extraRules...),
 		},
-		Faker: config.FakerCfg{NodeCount: 3, BlackholeIPs: []string{"192.0.2.1"}},
 	}
 
 	salt, err := token.LoadOrCreateSalt(saltPath)
@@ -91,10 +87,9 @@ func newE2E(t *testing.T, observe bool, extraRules ...config.Rule) (*Gateway, *h
 	if err != nil {
 		t.Fatal(err)
 	}
-	fk := faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	gw, err := NewGateway(cfg, hasher, st, bans, det, fk, AutoBanCfg{}, logger)
+	gw, err := NewGateway(cfg, hasher, st, bans, det, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,10 +159,9 @@ func TestE2EForwardsFlagToUpstreamAndKeepsEventFlag(t *testing.T) {
 			SQLitePath: dbPath, BatchFlushInterval: config.Duration(50 * time.Millisecond), BatchFlushSize: 1,
 			Retention: config.Retention{Events: config.Duration(time.Hour), Incidents: config.Duration(time.Hour)},
 		},
-		RealIP:  config.RealIP{TrustProxies: []string{"127.0.0.1"}, TrustHeaders: []string{"X-Real-IP"}},
-		Tenants: []config.Tenant{{Name: "default", Host: "sub.example.com", SubscribePath: "/sub/cat", Upstream: upURL.String()}},
+		RealIP:   config.RealIP{TrustProxies: []string{"127.0.0.1"}, TrustHeaders: []string{"X-Real-IP"}},
+		Tenants:  []config.Tenant{{Name: "default", Host: "sub.example.com", SubscribePath: "/sub/cat", Upstream: upURL.String()}},
 		Detector: config.DetectorCfg{ObserveOnly: true},
-		Faker:    config.FakerCfg{NodeCount: 3, BlackholeIPs: []string{"192.0.2.1"}},
 	}
 	salt, err := token.LoadOrCreateSalt(saltPath)
 	if err != nil {
@@ -183,7 +177,7 @@ func TestE2EForwardsFlagToUpstreamAndKeepsEventFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := NewGateway(cfg, token.NewHasher(salt), st, bans, det, faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount), AutoBanCfg{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	gw, err := NewGateway(cfg, token.NewHasher(salt), st, bans, det, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +253,17 @@ func TestE2ELumiUAEncryptsSubscription(t *testing.T) {
 	}
 }
 
+func TestE2ELumiCompatibilityCanBeDisabled(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false)
+	defer cleanup()
+	gw.cfg.DisableLumi = true
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "lumi android", "user-lumi-token-12345", "clash", "8.8.8.8"))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatal("disabling Lumi should return the normal subscription")
+	}
+}
+
 func TestLumiEncryptsExistingBase64SubscriptionAsBytes(t *testing.T) {
 	const tok = "base64-token-1234"
 	// v2board 普通订阅常见形态:响应体本身就是 base64 节点列表。
@@ -307,19 +312,14 @@ func TestE2ELumiUsesPathTokenWhenQueryTokenMissing(t *testing.T) {
 	}
 }
 
-func TestE2EBadUAReturnsFake(t *testing.T) {
+func TestE2EBadUARejected(t *testing.T) {
 	gw, _, _, _, cleanup := newE2E(t, false)
 	defer cleanup()
-
+	gw.SetUABlacklist(func(ua string) bool { return strings.HasPrefix(ua, "curl/") })
 	w := httptest.NewRecorder()
 	gw.ServeHTTP(w, mkSubReq("sub.example.com", "curl/8.0", "user1", "ss", "9.9.9.9"))
-	if w.Code != 200 {
-		t.Errorf("fake should return 200, got %d", w.Code)
-	}
-	// 新 fake 逻辑:拉上游真订阅 + 改节点 host 为 RFC5737。
-	// 测试 upstream 返回的不是节点 URI,因此 Poison 不动 body,直接透传。
-	if !strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
-		t.Errorf("fake should proxy upstream and return upstream body, got %q", w.Body.String())
+	if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatal("blocked UA must get 403 without the upstream body")
 	}
 }
 
@@ -327,17 +327,17 @@ func TestE2EHighTokenFreqRedDenyAndBan(t *testing.T) {
 	gw, _, _, bans, cleanup := newE2E(t, false)
 	defer cleanup()
 
-	// 5 个请求后触发命中(token_freq >=5)→ 投毒
+	// The fifth request reaches the frequency threshold.
 	for i := 0; i < 5; i++ {
 		w := httptest.NewRecorder()
 		gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClientApp/1.0", "samesubtoken", "clash", "10.0.0.1"))
 	}
 	time.Sleep(50 * time.Millisecond)
-	// 第 6 次:命中后仍是投毒(200 假节点)
+	// A rule hit rejects the subscription before contacting its upstream.
 	w := httptest.NewRecorder()
 	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClientApp/1.0", "samesubtoken", "clash", "10.0.0.1"))
-	if w.Code != 200 {
-		t.Errorf("expected 200 (poisoned), got %d", w.Code)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for rule hit, got %d", w.Code)
 	}
 	// banlist 不再被 SevRed 自动加入,bans 应当为空
 	if banned, _ := bans.CheckIP("10.0.0.1"); banned {
@@ -349,7 +349,7 @@ func TestE2EObserveOnly(t *testing.T) {
 	gw, _, _, _, cleanup := newE2E(t, true)
 	defer cleanup()
 
-	// observe_only 下,curl UA 命中规则但不该 fake
+	// A request with no configured matching rule passes.
 	w := httptest.NewRecorder()
 	gw.ServeHTTP(w, mkSubReq("sub.example.com", "curl/8.0", "tok", "ss", ""))
 	if w.Code != 200 {
@@ -368,9 +368,8 @@ func TestE2EManualBan(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClashforWindows/0.20", "t", "clash", "7.7.7.7"))
-	// banlist 命中也走投毒(200)
-	if w.Code != 200 {
-		t.Errorf("expected 200 (poisoned) for banned IP, got %d", w.Code)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for banned IP, got %d", w.Code)
 	}
 }
 
@@ -394,103 +393,32 @@ func TestE2EEventsPersisted(t *testing.T) {
 	if e.ClientIP != "8.8.8.8" || e.Action != "pass" || e.Flag != "clash" {
 		t.Errorf("unexpected event: %+v", e)
 	}
-	// token 直接存原文(面板要反查用户)
-	if e.TokenHash != "tttt" {
-		t.Errorf("expected raw token 'tttt', got %q", e.TokenHash)
+	if e.TokenHash != gw.hasher.Hash("tttt") || strings.Contains(e.Path, "tttt") {
+		t.Fatal("event leaked the raw subscription credential or lost its identifier")
 	}
 }
 
-// TestE2EGzipUpstreamPoisoned 回归保护:上游用 gzip 返回 base64 节点列表时,
-// 投毒必须解压 → 改 host → 重新压回。
-// 触发原因:Cloudflare 等 CDN 会强制塞 Content-Encoding: gzip,
-// 早期 Poison 直接对压缩字节流跑正则匹配不到 ss://,导致真节点透传。
-func TestE2EGzipUpstreamPoisoned(t *testing.T) {
-	// 自己起一个 gzip 上游 + 新 gateway,不复用 newE2E(它的上游是明文)
-	const subBody = "ss://aaaa@1.2.3.4:11300#hk\r\nss://bbbb@5.6.7.8:11301#jp\r\n"
-	encoded := base64.StdEncoding.EncodeToString([]byte(subBody))
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var buf bytes.Buffer
-		zw := gzip.NewWriter(&buf)
-		_, _ = zw.Write([]byte(encoded))
-		_ = zw.Close()
-		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
-		w.Header().Set("Content-Encoding", "gzip")
-		w.WriteHeader(200)
-		_, _ = w.Write(buf.Bytes())
-	}))
-	defer upstream.Close()
-	upURL, _ := url.Parse(upstream.URL)
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "gz.db")
-	saltPath := filepath.Join(dir, "salt")
-	cfg := &config.Config{
-		Listen: "127.0.0.1:0", AdminListen: "127.0.0.1:0", HMACSaltFile: saltPath,
-		Storage: config.Storage{
-			SQLitePath: dbPath, BatchFlushInterval: config.Duration(50 * time.Millisecond), BatchFlushSize: 5,
-			Retention: config.Retention{Events: config.Duration(time.Hour), Incidents: config.Duration(time.Hour)},
-		},
-		RealIP:  config.RealIP{TrustProxies: []string{"127.0.0.1"}, TrustHeaders: []string{"X-Real-IP"}},
-		Tenants: []config.Tenant{{Name: "default", Host: "sub.example.com", SubscribePath: "/sub/cat", Upstream: upURL.String()}},
-		Detector: config.DetectorCfg{
-			Rules: []config.Rule{{Name: "ip_red", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}}}},
-		},
-		Faker: config.FakerCfg{NodeCount: 3, BlackholeIPs: []string{"192.0.2.1"}},
-	}
-	salt, err := token.LoadOrCreateSalt(saltPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.Open(dbPath, 50*time.Millisecond, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	bans := banlist.New(st)
-	_ = bans.LoadFromStore(context.Background())
-	det, _ := detector.New(&cfg.Detector)
-	fk := faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	gw, err := NewGateway(cfg, token.NewHasher(salt), st, bans, det, fk, AutoBanCfg{}, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// 用 curl UA 强制命中 bad_ua → 走 respondFake
+func TestDeniedSubscriptionNeverContactsUpstream(t *testing.T) {
+	gw, upstream, st, _, cleanup := newE2E(t, false)
+	defer cleanup()
+	// If an upstream request occurs at all, it would fail (and must not become a 502).
+	upstream.Close()
+	gw.SetUABlacklist(func(string) bool { return true })
 	w := httptest.NewRecorder()
-	req := mkSubReq("sub.example.com", "curl/8.0", "tok", "", "9.9.9.9")
-	req.Header.Set("Accept-Encoding", "gzip")
-	gw.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "lumi android", "fixture-token", "", "192.0.2.9"))
+	if w.Code != http.StatusForbidden || w.Body.String() != "Forbidden\n" {
+		t.Fatalf("expected direct 403, got %d", w.Code)
 	}
-
-	// 响应:可能 gzip 也可能明文(看实现选哪种回写),都得 OK
-	respBody := w.Body.Bytes()
-	if w.Header().Get("Content-Encoding") == "gzip" {
-		zr, err := gzip.NewReader(bytes.NewReader(respBody))
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		incidents, err := st.AggIncidentsByIP(context.Background(), store.IncidentFilter{Action: "deny"})
 		if err != nil {
-			t.Fatalf("response should be valid gzip: %v", err)
+			t.Fatal(err)
 		}
-		respBody, err = io.ReadAll(zr)
-		_ = zr.Close()
-		if err != nil {
-			t.Fatalf("gunzip: %v", err)
+		if len(incidents) == 1 && incidents[0].Count == 1 {
+			return
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-
-	// body 应当还是 base64,解码后含 RFC5737 黑洞段
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(respBody)))
-	if err != nil {
-		t.Fatalf("response body not valid base64 after decompress: %v body=%q", err, string(respBody))
-	}
-	plain := string(decoded)
-	if strings.Contains(plain, "@1.2.3.4") || strings.Contains(plain, "@5.6.7.8") {
-		t.Errorf("真节点 IP 未被投毒,body=%q", plain)
-	}
-	if !strings.Contains(plain, "192.0.2.") && !strings.Contains(plain, "198.51.100.") && !strings.Contains(plain, "203.0.113.") {
-		t.Errorf("response 缺少黑洞 IP,body=%q", plain)
-	}
+	t.Fatal("denial incident was not written")
 }

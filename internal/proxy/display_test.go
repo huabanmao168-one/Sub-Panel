@@ -17,7 +17,6 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/banlist"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
-	"github.com/huabanmao168/SubPanel/internal/faker"
 	"github.com/huabanmao168/SubPanel/internal/parser"
 	"github.com/huabanmao168/SubPanel/internal/store"
 	"github.com/huabanmao168/SubPanel/internal/token"
@@ -73,7 +72,6 @@ func newDisplayE2E(t *testing.T, gzipped bool) (*Gateway, *store.Store, func()) 
 		RealIP:   config.RealIP{TrustProxies: []string{"127.0.0.1"}, TrustHeaders: []string{"X-Real-IP"}},
 		Tenants:  []config.Tenant{{Name: "default", Host: "sub.example.com", SubscribePath: "/sub/cat", Upstream: upURL.String()}},
 		Detector: config.DetectorCfg{ObserveOnly: true},
-		Faker:    config.FakerCfg{NodeCount: 3, BlackholeIPs: []string{"192.0.2.1"}},
 	}
 
 	salt, err := token.LoadOrCreateSalt(saltPath)
@@ -91,7 +89,6 @@ func newDisplayE2E(t *testing.T, gzipped bool) (*Gateway, *store.Store, func()) 
 		t.Fatal(err)
 	}
 	gw, err := NewGateway(cfg, token.NewHasher(salt), st, bans, det,
-		faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount), AutoBanCfg{},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -102,9 +99,9 @@ func newDisplayE2E(t *testing.T, gzipped bool) (*Gateway, *store.Store, func()) 
 	}
 }
 
-func seedUserEmail(t *testing.T, st *store.Store, tok, email string) {
+func seedUserEmail(t *testing.T, gw *Gateway, st *store.Store, tok, email string) {
 	t.Helper()
-	if err := st.UpsertUserReport(store.UserReport{Token: tok, Tenant: "default", Email: email}); err != nil {
+	if err := st.UpsertUserReport(store.UserReport{Token: gw.hasher.Hash(tok), Tenant: "default", Email: email}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -131,7 +128,7 @@ func installRule(t *testing.T, gw *Gateway, st *store.Store, r store.DisplayRule
 func TestDisplayRuleRewritesNormalClientBody(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, false)
 	defer cleanup()
-	seedUserEmail(t, st, "auto-token-123456", "someone@auto.com")
+	seedUserEmail(t, gw, st, "auto-token-123456", "someone@auto.com")
 	installRule(t, gw, st, store.DisplayRule{
 		Name: "auto品牌", MatchType: "email_suffix", MatchValue: "auto.com",
 		AirportFrom: "花瓣", AirportTo: "云帆",
@@ -164,10 +161,34 @@ func TestDisplayRuleRewritesNormalClientBody(t *testing.T) {
 	}
 }
 
+func TestLegacyDisplayRuleStillRewritesAfterTokenMigration(t *testing.T) {
+	gw, st, cleanup := newDisplayE2E(t, false)
+	defer cleanup()
+	const rawToken = "legacy-display-test-token"
+	if err := st.UpsertUserReport(store.UserReport{Token: rawToken, Tenant: "default", Email: "member@example.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	want := store.DisplayRule{Name: "existing replacement", Tenant: "default", MatchType: "email_suffix", MatchValue: "example.invalid", AirportFrom: "花瓣", AirportTo: "云帆", Replacements: `[{"from":"香港","to":"HK"}]`, ScopeNode: true, ScopeGroup: true, ScopeHeader: true, Enabled: true}
+	installRule(t, gw, st, want)
+	if err := st.MigrateTokenIDs(gw.hasher); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListDisplayRules()
+	if err != nil || len(rows) != 1 || rows[0].AirportTo != want.AirportTo || rows[0].Replacements != want.Replacements {
+		t.Fatal("migration changed the stored display rule")
+	}
+	gw.SetDisplayRules(rows)
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClashforWindows/0.20", rawToken, "clash", "192.0.2.8"))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "云帆 HK 01") || !strings.Contains(w.Header().Get("Content-Disposition"), "云帆.yaml") || !strings.Contains(w.Body.String(), "hk1.example.com") {
+		t.Fatal("existing rule failed to rewrite names after migration")
+	}
+}
+
 func TestDisplayRuleSkipsNonMatchingEmail(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, false)
 	defer cleanup()
-	seedUserEmail(t, st, "other-token-12345", "normal@gmail.com")
+	seedUserEmail(t, gw, st, "other-token-12345", "normal@gmail.com")
 	installRule(t, gw, st, store.DisplayRule{
 		Name: "auto品牌", MatchType: "email_suffix", MatchValue: "auto.com",
 		AirportFrom: "花瓣", AirportTo: "云帆",
@@ -203,7 +224,7 @@ func TestDisplayRuleSkipsUnknownToken(t *testing.T) {
 func TestDisplayRuleRespectsTenantScope(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, false)
 	defer cleanup()
-	seedUserEmail(t, st, "auto-token-123456", "someone@auto.com")
+	seedUserEmail(t, gw, st, "auto-token-123456", "someone@auto.com")
 	installRule(t, gw, st, store.DisplayRule{
 		Name: "只对别的机场", Tenant: "another", MatchType: "email_suffix", MatchValue: "auto.com",
 		AirportFrom: "花瓣", AirportTo: "云帆",
@@ -220,7 +241,7 @@ func TestDisplayRuleRespectsTenantScope(t *testing.T) {
 func TestDisplayRuleGzipUpstreamRoundTrip(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, true)
 	defer cleanup()
-	seedUserEmail(t, st, "auto-token-123456", "someone@auto.com")
+	seedUserEmail(t, gw, st, "auto-token-123456", "someone@auto.com")
 	installRule(t, gw, st, store.DisplayRule{
 		Name: "auto品牌", MatchType: "email_suffix", MatchValue: "auto.com",
 		AirportFrom: "花瓣", AirportTo: "云帆",
@@ -257,7 +278,7 @@ func TestDisplayRuleLumiRewritesBeforeEncrypt(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, false)
 	defer cleanup()
 	const tok = "lumi-auto-token-123456"
-	seedUserEmail(t, st, tok, "someone@auto.com")
+	seedUserEmail(t, gw, st, tok, "someone@auto.com")
 	installRule(t, gw, st, store.DisplayRule{
 		Name: "auto品牌", MatchType: "email_suffix", MatchValue: "auto.com",
 		AirportFrom: "花瓣", AirportTo: "云帆",
@@ -289,7 +310,7 @@ func TestDisplayRuleLumiRewritesBeforeEncrypt(t *testing.T) {
 func TestDisplayRuleFirstMatchWins(t *testing.T) {
 	gw, st, cleanup := newDisplayE2E(t, false)
 	defer cleanup()
-	seedUserEmail(t, st, "auto-token-123456", "someone@auto.com")
+	seedUserEmail(t, gw, st, "auto-token-123456", "someone@auto.com")
 	installRule(t, gw, st, store.DisplayRule{
 		Name: "先命中", MatchType: "email_suffix", MatchValue: "auto.com",
 		AirportFrom: "花瓣", AirportTo: "云帆",

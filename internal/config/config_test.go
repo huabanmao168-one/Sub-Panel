@@ -47,9 +47,6 @@ func TestLoadValid(t *testing.T) {
 	if c.Storage.BatchFlushSize == 0 {
 		t.Error("defaults not applied")
 	}
-	if c.Faker.NodeCount == 0 {
-		t.Error("faker defaults not applied")
-	}
 }
 
 func TestDurationParseDays(t *testing.T) {

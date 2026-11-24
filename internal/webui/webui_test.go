@@ -32,13 +32,11 @@ func setup(t *testing.T) (*Server, *store.Store, *banlist.List) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	pwdHash, _ := bcrypt.GenerateFromPassword([]byte("p@ss"), bcrypt.MinCost)
-	cfg := &config.Config{
-		Admin: config.AdminCfg{
-			Username:     "admin",
-			PasswordHash: string(pwdHash),
-			SessionTTL:   config.Duration(time.Hour),
-		},
-		Tenants: []config.Tenant{{Name: "default", Host: "x", SubscribePath: "/sub/x", Upstream: "http://x"}},
+	cfg := config.Defaults(filepath.Join(dir, "ui.db"))
+	cfg.Admin.PasswordHash = string(pwdHash)
+	cfg.Detector.Rules = nil
+	if err := st.InitRuntimeConfig(cfg, ""); err != nil {
+		t.Fatal(err)
 	}
 
 	salt, _ := token.LoadOrCreateSalt(filepath.Join(dir, "salt"))

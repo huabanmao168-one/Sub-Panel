@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -19,10 +20,14 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 鉴权: X-Report-Key header (secret 存在 meta 表)
-	secret, _ := s.st.GetMeta("report_secret")
+	secret, err := s.st.GetMeta("report_secret")
+	if err != nil {
+		writeJSON(w, 503, map[string]any{"error": "report settings unavailable"})
+		return
+	}
 	if secret != "" {
 		key := r.Header.Get("X-Report-Key")
-		if key != secret {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(secret)) != 1 {
 			writeJSON(w, 403, map[string]any{"error": "invalid report key"})
 			return
 		}
@@ -43,20 +48,20 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Token             string   `json:"token"`
-		UUID              string   `json:"uuid"`
-		Email             string   `json:"email"`
-		TrafficUsed       int64    `json:"traffic_used"`
-		TrafficTotal      int64    `json:"traffic_total"`
-		WalletBalance     int64    `json:"wallet_balance"`
-		CommissionBalance int64    `json:"commission_balance"`
-		UserCreatedAt     string   `json:"user_created_at"`
-		IP                string   `json:"ip"`
-		UserAgent         string   `json:"user_agent"`
-		SiteDomain        string   `json:"site_domain"`
+		Token             string `json:"token"`
+		UUID              string `json:"uuid"`
+		Email             string `json:"email"`
+		TrafficUsed       int64  `json:"traffic_used"`
+		TrafficTotal      int64  `json:"traffic_total"`
+		WalletBalance     int64  `json:"wallet_balance"`
+		CommissionBalance int64  `json:"commission_balance"`
+		UserCreatedAt     string `json:"user_created_at"`
+		IP                string `json:"ip"`
+		UserAgent         string `json:"user_agent"`
+		SiteDomain        string `json:"site_domain"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, 400, map[string]any{"error": "bad json: " + err.Error()})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "无效的上报数据"})
 		return
 	}
 	if body.Token == "" {
@@ -65,7 +70,7 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	report := store.UserReport{
-		Token:             body.Token,
+		Token:             s.hasher.Hash(body.Token),
 		Tenant:            tenant.Name,
 		UUID:              body.UUID,
 		Email:             body.Email,
@@ -102,7 +107,7 @@ func (s *Server) apiSuspects(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		dur = 168 * time.Hour
 	}
-	since := time.Now().Add(-dur)
+	since := s.statsSince(dur)
 
 	rows, err := s.st.QuerySuspects(tenant, since)
 	if err != nil {
@@ -132,10 +137,20 @@ func (s *Server) apiUserReports(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/report-info — 返回上报接入信息(secret + 订阅网关监听地址),供机场管理页展示
 func (s *Server) apiReportInfo(w http.ResponseWriter, r *http.Request) {
-	secret, _ := s.st.GetMeta("report_secret")
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		writeJSON(w, 405, map[string]any{"error": "GET only"})
+		return
+	}
+	secret, err := s.st.GetMeta("report_secret")
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": "读取上报设置失败"})
+		return
+	}
 	writeJSON(w, 200, map[string]any{
-		"report_secret": secret,
-		"sub_listen":    s.cfg.Listen,
+		"report_secret":   secret,
+		"sub_listen":      s.cfg.Listen,
+		"report_base_url": s.cfg.ReportBaseURL,
 	})
 }
 
@@ -155,9 +170,9 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		dur = 168 * time.Hour
 	}
-	since := time.Now().Add(-dur)
+	since := s.statsSince(dur)
 
-	detail, err := s.st.QuerySuspectDetail(token, tenant, since)
+	detail, err := s.st.QuerySuspectDetail(s.hasher.Lookup(token), tenant, since)
 	if err != nil {
 		s.logger.Error("query suspect detail", "err", err)
 		writeJSON(w, 500, map[string]any{"error": "query error"})
@@ -189,19 +204,28 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, detail)
 }
 
-// POST /api/report-info — 保存上报密钥
+// POST /api/report-info/save — 保存上报密钥；显式传空字符串才清除。
 func (s *Server) apiReportInfoSave(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ReportSecret string `json:"report_secret"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, 400, map[string]any{"error": "bad json"})
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
 		return
 	}
-	if body.ReportSecret == "" {
-		_ = s.st.DeleteMeta("report_secret")
+	var body struct {
+		ReportSecret *string `json:"report_secret"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil || body.ReportSecret == nil {
+		writeJSON(w, 400, map[string]any{"error": "必须提供 report_secret"})
+		return
+	}
+	var err error
+	if *body.ReportSecret == "" {
+		err = s.st.DeleteMeta("report_secret")
 	} else {
-		_ = s.st.SetMeta("report_secret", body.ReportSecret)
+		err = s.st.SetMeta("report_secret", *body.ReportSecret)
+	}
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": "保存上报设置失败"})
+		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

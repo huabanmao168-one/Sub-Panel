@@ -12,20 +12,21 @@ import (
 )
 
 type Config struct {
-	Listen       string      `yaml:"listen"`         // gateway 反代监听,如 127.0.0.1:8443
-	AdminListen  string      `yaml:"admin_listen"`   // Web UI 监听,如 127.0.0.1:9090
-	HMACSaltFile string      `yaml:"hmac_salt_file"` // HMAC salt 文件路径
-	Storage      Storage     `yaml:"storage"`
-	RealIP       RealIP      `yaml:"real_ip"`
-	Tenants      []Tenant    `yaml:"tenants"`
+	Listen       string   `yaml:"listen"`         // gateway 反代监听,如 127.0.0.1:8443
+	AdminListen  string   `yaml:"admin_listen"`   // Web UI 监听,如 127.0.0.1:9090
+	HMACSaltFile string   `yaml:"hmac_salt_file"` // HMAC salt 文件路径
+	Storage      Storage  `yaml:"storage"`
+	RealIP       RealIP   `yaml:"real_ip"`
+	Tenants      []Tenant `yaml:"tenants"`
 	// Paths 全局订阅路径已弃用,改为每租户独立 subscribe_path。
 	// 保留字段用于解析旧配置时给个明确报错提示(见 validate)。
-	Paths Paths `yaml:"paths,omitempty"`
-	Detector     DetectorCfg `yaml:"detector"`
-	// Actions 已废弃:命中规则即投毒,无等级映射。yaml 老配置里的 actions 节会被忽略。
-	Faker        FakerCfg    `yaml:"faker"`
-	Admin        AdminCfg    `yaml:"admin"`
-	GeoIP        GeoIPCfg    `yaml:"geoip"`
+	Paths          Paths       `yaml:"paths,omitempty"`
+	Detector       DetectorCfg `yaml:"detector"`
+	IngressProxies []string    `yaml:"-"` // immediate peers allowed to enter the subscription gateway
+	DisableLumi    bool        `yaml:"-"` // database setting; enabled by default for compatibility
+	ReportBaseURL  string      `yaml:"-"` // public URL for generated reporting instructions
+	Admin          AdminCfg    `yaml:"admin"`
+	GeoIP          GeoIPCfg    `yaml:"geoip"`
 }
 
 // GeoIPCfg ip2region xdb 配置。xdb_path 为空时整体禁用 geoip 功能,
@@ -79,21 +80,21 @@ type Rule struct {
 	Name string `yaml:"name"`
 	Desc string `yaml:"desc"`
 	When When   `yaml:"when"`
-	// Severity 已废弃:规则不再分等级,命中即投毒。yaml 里的 severity 字段会被忽略。
+	// Severity 已废弃:规则不再分等级，命中即拒绝。yaml 里的 severity 字段会被忽略。
 }
 
 type When struct {
-	TokenFreq        *Cond    `yaml:"token_freq"`
-	IPFreq           *Cond    `yaml:"ip_freq"`
-	TokenDistinctIPs *Cond    `yaml:"token_distinct_ips"`
-	IPDistinctTokens *Cond    `yaml:"ip_distinct_tokens"`
-	FromCloudIP      bool     `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
+	TokenFreq        *Cond `yaml:"token_freq"`
+	IPFreq           *Cond `yaml:"ip_freq"`
+	TokenDistinctIPs *Cond `yaml:"token_distinct_ips"`
+	IPDistinctTokens *Cond `yaml:"ip_distinct_tokens"`
+	FromCloudIP      bool  `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
 
 	// GeoIP 字段(需配 geoip.xdb_path 才生效)
 	// 同一字段 in 和 not_in 同时配时,not_in 优先(用于"非 CN 拒"这种反向白名单语义)
-	CountryIn      []string `yaml:"country_in"`       // 国家命中列表(ISO2/中文名都行)
-	CountryNotIn   []string `yaml:"country_not_in"`   // 国家不在列表则命中(反向白名单)
-	UsageTypeIn    []string `yaml:"usage_type_in"`    // IDC/CDN/DYN/MOB/COM 命中
+	CountryIn      []string `yaml:"country_in"`     // 国家命中列表(ISO2/中文名都行)
+	CountryNotIn   []string `yaml:"country_not_in"` // 国家不在列表则命中(反向白名单)
+	UsageTypeIn    []string `yaml:"usage_type_in"`  // IDC/CDN/DYN/MOB/COM 命中
 	UsageTypeNotIn []string `yaml:"usage_type_not_in"`
 	ISPContains    []string `yaml:"isp_contains"` // ISP 子串包含,任一命中即触发
 }
@@ -103,20 +104,25 @@ type Cond struct {
 	GTE    int      `yaml:"gte"`
 }
 
-type Whitelist struct {
-	IPs []string `yaml:"ips"`
+func (w When) MaxWindow() time.Duration {
+	var maxWindow time.Duration
+	for _, c := range []*Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens} {
+		if c != nil && c.Window.Std() > maxWindow {
+			maxWindow = c.Window.Std()
+		}
+	}
+	return maxWindow
 }
 
-type FakerCfg struct {
-	BlackholeIPs []string `yaml:"blackhole_ips"`
-	NodeCount    int      `yaml:"node_count"`
+type Whitelist struct {
+	IPs []string `yaml:"ips"`
 }
 
 type AdminCfg struct {
 	Username     string   `yaml:"username"`
 	PasswordHash string   `yaml:"password_hash"` // bcrypt
 	SessionTTL   Duration `yaml:"session_ttl"`
-	SessionKey   string   `yaml:"session_key"`   // 用于签 cookie,空则自动生成
+	SessionKey   string   `yaml:"session_key"` // 用于签 cookie,空则自动生成
 }
 
 // Duration 支持 "5m" / "24h" / "30d" 这种字符串
@@ -147,6 +153,15 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 func Load(path string) (*Config, error) {
+	c, err := LoadLegacy(path)
+	if err != nil {
+		return nil, err
+	}
+	return c.ForRuntime(), nil
+}
+
+// LoadLegacy reads a YAML migration source without expanding derived settings.
+func LoadLegacy(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -159,7 +174,6 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	c.applyDefaults()
-	applyCloudflare(&c)
 	return &c, nil
 }
 
@@ -208,8 +222,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validAction / ActionsCfg 已删除:命中规则统一投毒,无 action 概念。
-
 func (c *Config) applyDefaults() {
 	if c.Storage.BatchFlushInterval == 0 {
 		c.Storage.BatchFlushInterval = Duration(time.Second)
@@ -226,16 +238,6 @@ func (c *Config) applyDefaults() {
 	if c.Admin.SessionTTL == 0 {
 		c.Admin.SessionTTL = Duration(12 * time.Hour)
 	}
-	if len(c.Faker.BlackholeIPs) == 0 {
-		c.Faker.BlackholeIPs = []string{
-			"192.0.2.1", "192.0.2.2", "192.0.2.3",
-			"198.51.100.1", "198.51.100.2",
-			"203.0.113.1", "203.0.113.2",
-		}
-	}
-	if c.Faker.NodeCount == 0 {
-		c.Faker.NodeCount = 8
-	}
 	if c.AdminListen == "" {
 		c.AdminListen = "127.0.0.1:9090"
 	}
@@ -245,8 +247,9 @@ func (c *Config) applyDefaults() {
 // 匹配规则:取请求路径,按 tenant.SubscribePath 做"路径前缀"匹配,
 // 命中后 pathMatched=true。Host 头不参与路由。
 // 兼容两种命中形态:
-//   1. 完全相等(tp == urlPath)
-//   2. urlPath 以 tp+"/" 开头(允许子路径,例如 /sub/cat/extra)
+//  1. 完全相等(tp == urlPath)
+//  2. urlPath 以 tp+"/" 开头(允许子路径,例如 /sub/cat/extra)
+//
 // 没命中任何 tenant 返回 (nil, false)。
 func (c *Config) TenantByPath(urlPath string) (tenant *Tenant, pathMatched bool) {
 	urlPath = strings.TrimRight(urlPath, "/")
